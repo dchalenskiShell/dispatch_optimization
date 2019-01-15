@@ -4,10 +4,7 @@ Created on Sun Nov 18 15:40:52 2018
 
 @author: David.Chalenski
 
-2018-12-19:
-  This is the final version of the DO code which was used for the PoC.
-  It is being copied and held here for posterity
-  It should be run in the Anaconda environment PoC_fixed_2018_12_14 to ensure appropriate modules
+https://tdhopper.com/blog/my-python-environment-workflow-with-conda/
 
 
 To implement:
@@ -21,12 +18,24 @@ To implement:
     In general try to visualize what it's doing better, stacked revenue curve?
   Boolean OR 
   
+  TO IMPLEMENT SHORTER TERM
+  Comment code
+  Battery from PV, generator, grid
+  SR from any asset (generator, PV, battery, grid)
+  Cash flow and actual cost curve (e.g. with marginal costs)
+  Plat the future times as distributions (e.g. look at 5:00-5:05, see how much it varies as
+     you get new information throughout the day)
+  Energy export/import constraint (to meet an obligation)
+  Check close to 0 for battery net - do the marginal costs and degradation costs screw it up???
+  Input Fcast PV had some negative values - for now I clip all input values below 0
+  Ensure PV can curtail - may have been broekn after removed booleanPV control due ot battery charge from PV
+  Add a check block to see if RT price - marginal prices goes negative - will expose weird fringe cases
   
-This should be run on Env
-
-NOTE: AG needs battery discharge to be +, opposite the convention here
-I have implemented battery_sign to flip this below.  This may have knock-on effects
-  
+  2018-01-02 Created v3_testing
+    Plan to change structure of code, going from constraints of import/export to moving terms into the objective function
+    Updating/changing variable names
+    removed PV curtail and let be solved endogenously
+    
   
 """
 
@@ -48,7 +57,7 @@ plt.close('all')
 
 #====================TESTING PARAMETERS================
 #Some of these may need to be nuked when productized
-splitPower = True #Do you want to split power into pos and neg?
+#OLD#splitPower = True #Do you want to split power into pos and neg?
 manipulateLoad = False #Artificially modify Sr load for testing purposes
 manipulateLoadValue = 2 #can do, 2, 5, etc.
 
@@ -59,49 +68,59 @@ start = timer()
 
 createLogfile = True
 currFilePath = os.path.dirname(os.path.realpath(__file__))
-currFileName = 'battery_schedule_lp_test_v2.py'
+currFileName = os.path.basename(__file__)
 
 #============Input variables===========
+#NOTE: these are all positive kW values, irrespective of whether net demand or consume - negation is handled below in model definition
 SOC_init = 500 #kWh  #WILL COME FROM TONY
 SOC_fixed = 840
 SOCMin = 200 #kWh
 SOCMax = 1050 #kWh
 powerBatteryMax = 250 #kW
-intervalsPerHour = 4 #e.g. 15-minute intervals = 4 per hour #WILL COME FROM TONY
-#Do we need to scale the input PV values because we are using my roof vs STCH MG
+powerPVMax = 350 #kW, not super important, as PV always constrained to below forecasted PV
 PVScale = 5
 PVRoundTripEfficiency = 1
 gensetHeatRate = 9.8
 costGas = 3 #($/MWh)
-netInterconnectConstraint = 300 #kW
+netInterconnectConstraint = 200 #kW
 #Marginal costs are currently used to prioritize these assets
 #Higher marginal costs forces that asset to curtail over lower marginal cost assets
 #This is currently not figured in to the actual revenue calculations
 #They are arbitrary and small so as to have little impact if prices are low
 marginalCostBattery = .0002 #Just priority, does not include degradation costs
+#print("**********marginal cost of battery overwritten********")
 marginalCostPV = .0001 #PV has the highest priority, lowest marginal cost
 marginalCostGenset =  .0003 #This does not account for gas price, just priority
 #CostToCharge = 1.5 #
 #CostToDischarge = .5 #
-batteryDegrades = True #Do you want to figure in battery degradation?
+batteryDegrades = False #Do you want to figure in battery degradation?
 enableBattery = True #from TONY
 enablePV = True #from TONY
-enablePVCurtail = True #from TONY
-enableGenset = True #from TONY
-enableLoadBank = True #from TONY
+#enablePVCurtail = True #from TONY
+enableGenset = False #from TONY
+enableLoadBank = False #from TONY
 enableSRLoad = True #MAYBE from TONY
 enableNetInterconnectConstraint = True 
 returnToSOC = True #Need to implement
 enableDCM = True #enable demand charge management - Vestigial
+clipNegPVInput = True
 #convertPriceInMWtoKW = False
 enableMarginalCosts = True
 resampleFcastsFiveMins = False
-priceSpike = True
+priceSpike = False
 priceSpikeAmt = 50 #$/MWh for spike
 #Sets all the parameters for the December PoC run
 PoC_run = False
 runOnVM = False
 timeSoCFixed = 178
+
+#BTM paramaters
+#Can PV go straight to SR building or charge battery?
+PVtoBattery = True
+PVtoSR = True
+batteryToSR = False
+gensetToSR = False
+
 
 #Read parameters and forecasts files
 if runOnVM:
@@ -125,17 +144,6 @@ if resampleFcastsFiveMins:
   fcast = fcast.resample('5Min').ffill()
   intervalsPerHour = 12
 
-"""
-#Simulate a price spike?
-if priceSpike:
-  tmp = datetime.datetime.now() - datetime.timedelta(hours=12)
-  now = tmp.time()
-  #price.index = pd.to_datetime(df.index)
-  time1 = fcast[fcast.index.time <= now][-1:].index
-  time2 = fcast[fcast.index.time >= now][:1].index
-  fcast.loc[time1,'fc_rt_price'] = priceSpikeAmt
-  fcast.loc[time2,'fc_rt_price'] = priceSpikeAmt
-"""
 #=============/Input Variables=============
 battery_sign = 1 #AG reads positive as DISCHARGE, so need to flip sign if generating plan for them
 
@@ -153,13 +161,13 @@ if PoC_run:
   batteryDegrades = True #Do you want to figure in battery degradation?
   enableBattery = True
   enablePV = False
-  enablePVCurtail = False
+  #enablePVCurtail = False
   enableGenset = False
   enableLoadBank = False 
   enableSRLoad = True 
   enableNetInterconnectConstraint = True
   enableMarginalCosts = True
-  netInterconnectConstraint = 200 #kW
+  netInterconnectConstraint = 100 #kW
   manipulateLoad = False
   PVScale = 1
   battery_sign = -1
@@ -174,13 +182,17 @@ if PoC_run:
   else:
     currFilePath = os.path.dirname(os.path.realpath(__file__))
     currFileName = 'battery_schedule_lp_test_v2.py'
-  intervalsPerHour = 12
+  #intervalsPerHour = 12
   resampleFcastsFiveMins = False
  
   now = datetime.datetime.now()
   dateToday = now.strftime("%Y-%m-%d")
   rngPoC = pd.date_range(str(dateToday) + ' 06:00:00', periods= len(fcast), freq='5Min') #Add 6 to get time to UTC
   fcast = fcast.set_index( rngPoC )
+
+#determine number of intervals per hour from input forecast
+#e.g. 15-minute intervals = 4 per hour
+intervalsPerHour = 60 / int(pd.infer_freq(fcast.index)[:-1]) 
 
 #Convert price input DatFrame to pyomo-readable dict
 price = fcast['fc_rt_price'].copy()
@@ -202,8 +214,8 @@ if not PoC_run:
   if False:
     #Test prices at 0 except 2-hour period in middle of day
     price.iloc[:] = 0
-    price.iloc[1:5] = 100
-    price.iloc[ 51:75 ] = 50
+    price.iloc[110:150] = 150
+    price.iloc[ 151:250 ] = 75
   elif False:
     #Linearly increasing price
     price.iloc[:] = np.arange( len(fcast ) )
@@ -213,14 +225,16 @@ if not PoC_run:
     price.iloc[ 51:75 ] = -50
   elif False:
     #Respond to positive and negative prices
-    price.iloc[:] = 5
-    price.iloc[ 21:36 ] = -50 
-    price.iloc[ 51:70 ] = 50
-  elif False:
+    price.iloc[:] = 20
+    #price.iloc[ 21:36 ] = -50 
+    price.iloc[ 51:150 ] = 50
+  elif True:
     #Respond to positive and negative prices
-    price.iloc[:] = 1
-    price.iloc[ 21:36 ] = 50 
-    price.iloc[ 51:70 ] = -50
+    price.iloc[:] = 15
+    #price.iloc[ 21:36 ] = 50 
+    price.iloc[ 120:180 ] = 50
+    price.iloc[ 180:210 ] = 75
+    price.iloc[ 210: ] = 50
   elif False:
     #constant price throughout period
     price.iloc[:] = 50
@@ -230,6 +244,9 @@ if not PoC_run:
     price.iloc[ 15:25 ] = -50 
     price.iloc[ 51:71 ] = 45
     price.iloc[ 71:80 ] = 50
+
+
+
 
 #powerLoadBank = fcast['fc_solar_kw'].copy()
 
@@ -246,7 +263,8 @@ else:
 
 #=============Battery degradation estimation===========
 #This is a rough estimator for figuring in degradation of battery costs
-#assumes a fixed reduction and future value of 
+#assumes a fixed reduction and future value of value
+#numbers taken from DH bids, XX% capacity remaining after YY years with 1 cycle per day
 #Assume following numbers:
 if batteryDegrades:
   capacityRetained = 0.7 #% of capacity remaining after X years
@@ -277,34 +295,41 @@ loadSR.index = np.arange( len(fcast) )
 loadSRDict = loadSR.to_dict()
 #Read in forecast of solar PV in KW
 #Note: PV is export, so power is negative
-fcastPV = fcast['fc_solar_kw'].copy() *-1 * PVScale
+if clipNegPVInput:
+  fcastPV = fcast['fc_solar_kw'].clip(lower=0).copy() *-1 * PVScale
+else:
+  fcastPV = fcast['fc_solar_kw'].copy() *-1 * PVScale
 if not enablePV:
   fcastPV[:] = 0
 fcastPV.index = np.arange( len(fcast) )
+
+fcastPV.head()
+
+if not PoC_run:
+  #Setup test forecast cases
+  if True:
+    #Test prices at 0 except 2-hour period in middle of day
+    fcastPV[:] = 0
+    fcastPV[110:150] = -1500
+    fcastPV[ 150:250 ] = -375
+  elif False:
+    #Linearly increasing price
+    fcastPV[:] = np.arange( len(fcast ) )
+  elif False:
+    fcastPV[:] = 0
+    fcastPV[110:150] = -150
+    fcastPV[ 151:250 ] = -75
+  elif False:
+    fcastPV[:] = 0
+    fcastPV[110:150] = -150
+    fcastPV[ 151:250 ] = -75
+    
+fcastPV.head()
+    
 #Zero out PV where price forecasted to be negative
-if enablePVCurtail:
-  fcastPV = fcastPV * (price >= 0)
+#if enablePVCurtail:
+#  fcastPV = fcastPV * (price >= 0)
 fcastPVDict = fcastPV.to_dict()
-
-
-
-
-#Create variable for PV - SR load
-#If positive, PV > SR and export
-deltaPVSR = fcastPV - loadSR
-#deltaPVSRDict = deltaPVSR.to_dict()
-deltaPVSRPos = deltaPVSR.copy()
-deltaPVSRNeg = deltaPVSR.copy()
-for i, a in enumerate(deltaPVSR):
-  if a>=0:
-    deltaPVSRNeg[i] = 0
-  else:
-    deltaPVSRPos[i] = 0
-deltaPVSRPosDict = deltaPVSRPos.to_dict()
-deltaPVSRNegDict = deltaPVSRNeg.to_dict()
-
-
-
 
 #============/Manipulate  inputs=======================
 
@@ -315,61 +340,95 @@ m = en.ConcreteModel()
 #RangeSet: start, end, step
 #keep Python ordering by starting at 0
 m.T = en.RangeSet(0, len(priceDict) - 1 )
-"""
-def d(m):
-  return np.arange(96)
-m.T = en.Set(initialize = d)
-"""
+
 # PARAMETERS
 # # Real Time Price forecast, time t
 m.price = en.Param(m.T, within = en.Reals, initialize = priceDict)
 m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
 m.fcastPV = en.Param(m.T, within = en.Reals, initialize = fcastPVDict)
-m.deltaPVSRPos = en.Param(m.T, within = en.Reals , initialize = deltaPVSRPosDict)
-m.deltaPVSRNeg = en.Param(m.T, within = en.Reals , initialize = deltaPVSRNegDict)
   
 #VARIABLES
 #Discharge power (note this is obviously instantaneous, not scaled for 15 minute interval)
 #Initialize most to 0 so final iteration remains finite
-m.powerBattery = en.Var( m.T, bounds=(-powerBatteryMax, powerBatteryMax), initialize = 0 )
+#OLD#m.powerBattery = en.Var( m.T, bounds=(-powerBatteryMax, powerBatteryMax), initialize = 0 )
 m.SOC = en.Var(m.T, bounds=(SOCMin, SOCMax) ) 
-m.powerBatteryPos = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
-m.powerBatteryNeg = en.Var( m.T, bounds=(-powerBatteryMax, 0), initialize = 0 )
-m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax ), initialize = 0 )
-if enablePVCurtail:
-  m.booleanPV = en.Var( m.T, within = en.Boolean , initialize = enablePV )
+if enableBattery:
+  m.powerBatteryPos = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
+  m.powerBatteryNeg = en.Var( m.T, bounds=(-powerBatteryMax, 0), initialize = 0 )
+  m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
 else:
-  m.booleanPV = en.Var( m.T, bounds = (True , True) , initialize = enablePV )
-m.powerGenset = en.Var( m.T, bounds=( -powerGensetMax, 0 ), initialize = 0 )
-m.powerImport = en.Var( m.T, initialize = 0 )
-m.powerExport = en.Var( m.T, initialize = 0 ) #IS THERE WHERE WE WANT TO IMPOSE EXPORT CONSTRAINT???
+  m.powerBatteryPos = en.Var( m.T, bounds=(0, 0), initialize = 0 )
+  m.powerBatteryNeg = en.Var( m.T, bounds=(0, 0), initialize = 0 )
+  m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, 0), initialize = 0 )
+
+if enableLoadBank:
+  m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax ), initialize = 0 )
+else:
+  m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax ), initialize = 0 )
+
+#if enablePVCurtail:
+#  m.booleanPV = en.Var( m.T, within = en.Boolean , initialize = enablePV )
+#else:
+#  m.booleanPV = en.Var( m.T, bounds = (True , True) , initialize = enablePV )
+
+if enableGenset:
+  m.powerGenset = en.Var( m.T, bounds=( -powerGensetMax, 0 ), initialize = 0 )
+else:
+  m.powerGenset = en.Var( m.T, bounds=( 0, 0 ), initialize = 0 )
+#OLD#m.powerImport = en.Var( m.T, initialize = 0 )
+#OLD#m.powerExport = en.Var( m.T, initialize = 0 ) #IS THERE WHERE WE WANT TO IMPOSE EXPORT CONSTRAINT???
+#New below after December PoC completed
+
+
+if enablePV:
+  m.batteryChargeFromPV = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
+  m.PVtoGrid = en.Var( m.T, bounds=(-powerPVMax, 0), initialize = 0 )
+else:
+  m.batteryChargeFromPV = en.Var( m.T, bounds=(0, 0), initialize = 0 )
+  m.PVtoGrid = en.Var( m.T, bounds=(0, 0), initialize = 0 )
+
+m.SRfromPV = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
+m.SRfromGrid = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
+m.SRfromBattery = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
 
 #if enablePV:
 #  m.powerPV = en.Var( m.T, bounds=(0, powerPVMax), initialize = fcastPVDict )  #REALLLYYYY??????????
 #else:
 #  m.powerPV = en.Var( m.T, bounds=(0, powerPVMax), initialize = 0 )
 
-
-
 #OBJECTIVE STATEMENT
 """things this may not do yet:
-degradation cost
 turn PV off
 return to SOC
 """
 def Total_cost(model):
-  #Battery Charge + Battery Discharge + Load Bank + PV full/0
   #Note all powers + mean importing (buying/charging/consuming)
-  return sum(   \
-      ( m.powerImport[t] + m.powerExport[t] ) * m.price[t] \
-      + ( m.powerBatteryPos[t] * degradationCostSlope * enableBattery ) \
-      - ( m.powerBatteryNeg[t] * degradationCostSlope * enableBattery )
-      for t in m.T)
-#      ( ( m.powerBatteryPos[t] - deltaPVSRPos[t] * enableDCM ) * m.price[t] + ( m.powerBatteryPos[t] * degradationCostSlope ) ) + \
-#      ( ( m.powerBatteryNeg[t] - deltaPVSRNeg[t] * enableDCM ) * m.price[t] - ( m.powerBatteryNeg[t] * degradationCostSlope ) ) + \
-#      ( m.powerLoadBank[t] * m.price[t] ) + \
-#      ( m.booleanPV[t] * -m.price[t] ) \
-#      for t in m.T)  #Note: +ve power = charge/consume/import (EE convention)
+  #note: 0.000001 additions below were just to ensure not div/0 when testing price=0
+  return sum(   
+    (
+    #battery supply/discharge to grid
+    ( m.powerBatteryNeg[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
+    #Battery consume/charge from PV at grid price
+    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
+    #Battery consume/charge from PV at ~0 marginal cost
+    + ( m.batteryChargeFromPV[t] * ( ( marginalCostBattery + marginalCostPV ) /  ( m.price[t] + 0.000001) ) ) * PVtoBattery
+    #PV supply to grid
+    + m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) \
+    #Genset supply to grid
+    + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) )
+    #SR building consume from grid
+    + m.SRfromGrid[t]  
+    #SR consume from PV
+    + ( m.SRfromPV[t] * ( marginalCostPV /  ( m.price[t] + 0.000001) ) ) * PVtoSR
+    #SR consume from Battery
+    + ( m.SRfromBattery[t] * ( ( marginalCostPV + marginalCostBattery ) /  ( m.price[t] + 0.000001) ) ) * batteryToSR
+    #Load bank consume from grid
+    + m.powerLoadBank[t]
+    ) * m.price[t]
+    #NOT SURE IF BELOW WORK PROPERLY
+    + ( m.powerBatteryPos[t] * degradationCostSlope * enableBattery ) 
+    - ( m.powerBatteryNeg[t] * degradationCostSlope * enableBattery )
+    for t in m.T)
 m.OBJ = en.Objective(rule=Total_cost, sense = en.minimize)
 
 
@@ -382,36 +441,54 @@ def State(m, t):
 #    if t == timeSoCFixed:
 #        return m.SOC[t] == SOC_fixed   #Initialize at 50% SOC  #100 + m.powerBattery[t]
     else:        
-      if splitPower:
-        return m.SOC[t] == m.SOC[t-1] + ( enableBattery * (m.powerBatteryNeg[t-1] + m.powerBatteryPos[t-1]) / intervalsPerHour )   
-      else:
-        return m.SOC[t] == m.SOC[t-1] + ( enableBattery * m.powerBattery[t-1] / intervalsPerHour ) 
+      return m.SOC[t] == m.SOC[t-1] + ( enableBattery * (m.powerBatteryNeg[t-1] + m.powerBatteryPos[t-1]) / intervalsPerHour )   
 m.State_of_charge = en.Constraint(m.T, rule = State)
 
+"""
 #MG new power out (generate/export/discharge) terms
+#note: 0.000001 additions below were just to ensure not div/0 when testing price=0
 def power_export(m, t):
   return m.powerExport[t] ==  \
       ( m.powerBatteryNeg[t] * enableBattery * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) \
-      + m.fcastPV[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) \
-      + ( m.fcastPV[t] * m.booleanPV[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) ) \
+      + m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) \
       + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) ) 
-      #+ ( deltaPVSRNeg[t]  * enableDCM )  #+ m.powerGenset[t]
+      #+ ( m.fcastPV[t] * m.booleanPV[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) ) \ #Commented this because it duplicates an above line
 m.powerExportConst = en.Constraint(m.T, rule = power_export)
-
+"""
+"""
 #MG new power in (consume/import/charge) terms
 #This follows sign constraint, -ve means export
 def power_import(m, t):
   return m.powerImport[t] == \
-      ( m.powerBatteryPos[t]  * enableBattery * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) \
+      ( m.batteryChargeFromGrid[t] * enableBattery * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) \
+      + ( m.batteryChargeFromPV[t] * enableBattery * ( ( marginalCostBattery + marginalCostPV ) /  ( m.price[t] + 0.000001) ) ) \
       + m.loadSR[t]  \
       + m.powerLoadBank[t]
-      #+ ( deltaPVSRPos[t]  * enableDCM )
 m.powerImportConst = en.Constraint(m.T, rule = power_import)
+"""
+
+#Battery charge from any source cannot exceed max power
+def battery_charge_max(m, t):
+  return m.powerBatteryPos[t] == m.batteryChargeFromGrid[t] + m.batteryChargeFromPV[t]
+m.batteryChargeConst = en.Constraint(m.T, rule = battery_charge_max )
+
+
+#Load of SR building must be met but source can be battery, grid or PV
+def SR_consume_conservation(m, t):
+  return m.loadSR[t] == m.SRfromPV[t] + m.SRfromGrid[t] + m.SRfromBattery[t]
+m.SRConserveConst = en.Constraint(m.T, rule = SR_consume_conservation )
+
+
+#Can't commit to using more PV than available from forecast
+#The elements are different sign (battery charge and PY discharge), hence negative
+def PV_commit_max(m, t ):
+  return m.fcastPV[t] <= m.PVtoGrid[t] - m.batteryChargeFromPV[t]
+m.PVcommitConst = en.Constraint(m.T, rule = PV_commit_max )
 
 
 if enableNetInterconnectConstraint:
   def net_export_constraint(m, t):
-    return -netInterconnectConstraint <= m.powerBatteryNeg[t] + m.powerBatteryPos[t] + ( m.fcastPV[t] * m.booleanPV[t] ) + m.powerGenset[t] + m.powerLoadBank[t] + m.loadSR[t] <= netInterconnectConstraint
+    return -netInterconnectConstraint <= m.powerBatteryNeg[t] + m.batteryChargeFromGrid[t] + m.PVtoGrid[t]  + m.powerGenset[t] + m.powerLoadBank[t] + m.loadSR[t] <= netInterconnectConstraint
   m.netInterconnectConstraint = en.Constraint(m.T, rule = net_export_constraint)
 
 #=============Solve the model==========================
@@ -424,7 +501,7 @@ print('solving...')
 results = opt.solve(m)
 print('duration of solve : ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 
-#m.display() #Uncomment to display results
+#m.display() #Uncomment to display results, but shoudl just check log file
 #=============/Solve the model==========================
 
 
@@ -436,9 +513,17 @@ powerBatteryPosSolved = np.zeros( (len(price)) )
 powerLoadBankSolved = np.zeros( (len(price)) )
 loadSRSolved = np.zeros( (len(price)) )
 powerGensetSolved = np.zeros( (len(price)) )
+powerImportSolved = np.zeros( (len(price)) )
+powerExportSolved = np.zeros( (len(price)) )
+batteryChargeFromGridSolved = np.zeros( (len(price)) )
+batteryChargeFromPVSolved = np.zeros( (len(price)) )
+PVtoGridSolved = np.zeros( (len(price)) )
 booleanPVSolved = np.zeros( (len(price)) )
 priceSolved = np.zeros( (len(price)) )
 netInterconnectPower = np.zeros( (len(price)) )
+SRfromPVSolved = np.zeros( (len(price)) )
+SRfromGridSolved = np.zeros( (len(price)) )
+SRfromBatterySolved = np.zeros( (len(price)) )
 #negPriceOut = np.zeros( (len(price)) )
 #posPriceOut = np.zeros( (len(price)) )
 
@@ -452,30 +537,38 @@ if createLogfile:
 #Access variables
 j = 0
 for v in m.component_objects(en.Var, active=True):
-    print("Variable",v)
+    print("Variable #",str(j),v)
     for index in v:
         #print ("   ",index, en.value(v[index]))
         if j == 0:
-          powerBatterySolved[index] = en.value(v[index])      
-        elif j == 1:
           SOCSolved[index] = en.value(v[index])
-        elif j == 2:
+        elif j == 1:
           powerBatteryPosSolved[index] = en.value(v[index])
-        elif j == 3:
+        elif j == 2:
           powerBatteryNegSolved[index] = en.value(v[index])
+        elif j == 3:
+          batteryChargeFromGridSolved[index] = en.value(v[index])
         elif j == 4:
           powerLoadBankSolved[index] = en.value(v[index])
         elif j == 5:
-          booleanPVSolved[index] = en.value(v[index])
-        elif j == 6:
           powerGensetSolved[index] = en.value(v[index])
+        elif j == 6:
+          batteryChargeFromPVSolved[index] = en.value(v[index])
+        elif j == 7:
+          PVtoGridSolved[index] = en.value(v[index])
+        elif j == 8:
+          SRfromPVSolved[index] = en.value(v[index])
+        elif j == 9:
+          SRfromGridSolved[index] = en.value(v[index])
+        elif j == 10:
+          SRfromBatterySolved[index] = en.value(v[index])
     j+=1
         
 #access parameters (to double check)
 #Don't really need neg and pos since they are just the sign-separated price
 j = 0
 for parmobject in m.component_objects(en.Param, active=True):
-    print ("Parameter "+str(parmobject.name))
+    print ("Parameter # ",str(j),str(parmobject.name))
     for index in parmobject:
         #print ("   ",index, en.value(parmobject[index]))
         if j == 0:
@@ -488,29 +581,27 @@ for parmobject in m.component_objects(en.Param, active=True):
       
 SOCSolvedPercent = SOCSolved / SOCMax
 
-scheduledPVSolved = fcastPV * booleanPVSolved
+scheduledPVSolved = PVtoGridSolved - batteryChargeFromPVSolved - SRfromPVSolved 
 
 #Consistency check
-if splitPower:
-  a = powerBatteryPosSolved > 0  
-  b = powerBatteryNegSolved > 0
-  batteryError = np.sum(a*b)
-  if batteryError:
-    print('WARNING: YOU SEEM TO HAVE A TIME WHEN THE BATTERY WANTED TO CHARGE AND DISCHARGE SIMULTANEOUSLY!!!')
-    print('Continuing on...')
+a = powerBatteryPosSolved > 0  
+b = powerBatteryNegSolved > 0
+batteryError = np.sum(a*b)
+if batteryError:
+  print('WARNING: YOU SEEM TO HAVE A TIME WHEN THE BATTERY WANTED TO CHARGE AND DISCHARGE SIMULTANEOUSLY!!!')
+  print('Continuing on...')
 
 #Compile power out from power out pos and power out neg
-if splitPower:
-  powerBatterySolved = ( powerBatteryPosSolved + powerBatteryNegSolved )
+powerBatterySolved = ( powerBatteryPosSolved + powerBatteryNegSolved )
 
 #Calculate revenue/cost
-netCashBattery = -priceSolved * powerBatterySolved / intervalsPerHour / 1000 #div by 1000 bc price in MW
+netCashBattery = -priceSolved * ( batteryChargeFromGridSolved + powerBatteryNegSolved ) / intervalsPerHour / 1000 #div by 1000 bc price in MW
 #Battery revenue + load bank revenue + solar revenue - SR load costs
 netCashTotal = -( \
-        ( priceSolved * powerBatterySolved / intervalsPerHour ) \
+        ( priceSolved * ( batteryChargeFromGridSolved + powerBatteryNegSolved ) / intervalsPerHour ) \
         + (priceSolved * powerLoadBankSolved / intervalsPerHour) \
-        + (priceSolved * scheduledPVSolved / intervalsPerHour) \
-        + (priceSolved * loadSRSolved / intervalsPerHour) \
+        + (priceSolved * PVtoGridSolved / intervalsPerHour) \
+        + (priceSolved * SRfromGridSolved / intervalsPerHour) \
         + (priceSolved * powerGensetSolved / intervalsPerHour) \
         ) / 1000  #div by 1000 because price in MWh, convert to KWh
 print("Net Cash Flow is $: " + str(np.round(np.sum (netCashTotal) , 2) ) )  #I HAVE NEGATED - BETTER TO BE CONSISTENT WITH NEG FROM BEGINNING
@@ -518,14 +609,14 @@ cashFlowTotal = np.cumsum(netCashTotal)
 #netCashBattery = np.cumsum(netCashBattery)
 
 #generate cash flow if the assets didn't run
-cashFlowSROnly = np.cumsum( -priceSolved * loadSRSolved / intervalsPerHour ) / 1000
+cashFlowSROnly = np.cumsum( -priceSolved * SRfromGridSolved / intervalsPerHour ) / 1000
 
 print("Battery-only revenue is $: " + str(np.round(np.sum (netCashBattery) , 2) ) )  #I HAVE NEGATED - BETTER TO BE CONSISTENT WITH NEG FROM BEGINNING
 cashflowBattery = np.cumsum(netCashBattery)
 
 print('Average state of charge throughour period is: ' + str(np.round(100*np.average(SOCSolvedPercent))) + '%')
 
-netInterconnectPower = powerBatterySolved + loadSRSolved + scheduledPVSolved + powerGensetSolved + powerLoadBankSolved
+netInterconnectPower = powerBatteryNegSolved + batteryChargeFromGridSolved +  PVtoGridSolved + loadSRSolved + powerGensetSolved + powerLoadBankSolved
 
 #=============/Retrieve results==============================
 
@@ -545,7 +636,8 @@ planOut['genset_kW'] = powerGensetSolved
 planOut.loc[ planOut['genset_kW'] != 0 , 'genset_enable']  = 'enable'
 planOut.loc[ planOut['genset_kW'] == 0 , 'genset_enable']  = 'disable'
 
-broken_barh_plot.plot_enables(planOut, dirLogsOut, epochTime)
+#Broekn until pos neg battery charge fixed
+#broken_barh_plot.plot_enables(planOut, dirLogsOut, epochTime)
 
 #AUTOGRID NEEDS DISCHARGE +, SO FLIP SIGN HERE
 planOut['battery_kW'] *= battery_sign
@@ -602,12 +694,52 @@ fig.tight_layout()
 plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure.png')
 #plt.show()
 
-if splitPower:
-  plt.figure()
-  plt.plot(powerBatteryPosSolved, 'r')
-  plt.plot(powerBatteryNegSolved)
-  plt.plot(powerBatteryPosSolved + powerBatteryNegSolved, 'g')
+#Second subplotted figure
+#fig, ax = plt.subplots(2,2, figsize = (12,12))
+fig = plt.figure(figsize = (16,16))
+ax1 = fig.add_subplot(321)
+ax1.plot(powerBatteryPosSolved, 'r')
+ax1.plot(powerBatteryNegSolved)
+ax1.plot(powerBatteryPosSolved + powerBatteryNegSolved, 'g')
+plt.legend(['battery pos/charge', 'battery neg/discharge', 'battery net'])
 
+ax2 = fig.add_subplot(322)
+#plt.plot(powerBatterySolved, 'k', linewidth = 3)
+ax2.plot(powerBatteryPosSolved + 5, linewidth = 3)
+#plt.plot(powerBatteryNegSolved - 5, linewidth = 3)
+ax2.plot(batteryChargeFromPVSolved - 3)
+ax2.plot(batteryChargeFromGridSolved)
+ax2.set_title('Battery power sources and sinks')
+plt.legend([ 'Battery pos', 'battery from PV', 'battery from grid' ])
+
+
+ax3 = fig.add_subplot(323)
+ax3.plot(PVtoGridSolved)
+ax3.plot(batteryChargeFromPVSolved+2, linewidth=3)
+ax3.plot(fcastPV+5)
+plt.legend(['Pv to grid', 'battery charge from PV +2', 'forecast PV +5'])
+
+ax4 = fig.add_subplot(324)
+ax4.plot(batteryChargeFromGridSolved)
+ax4.plot(powerBatteryNegSolved)
+ax4.plot(PVtoGridSolved)
+ax4.plot(loadSRSolved)
+ax4.plot(powerGensetSolved)
+ax4.plot(powerLoadBankSolved)
+ax4.plot(netInterconnectPower,'k', linewidth = 2.5)
+plt.legend(['battery from grid','battery to grid', 'pv to grid','SR bldg','genset','load bank','net interconnect'])
+ax4.set_title('contributions to net interconnect')
+
+ax4 = fig.add_subplot(325)
+ax4.plot(loadSRSolved, linewidth=3)
+ax4.plot(SRfromGridSolved+2)
+ax4.plot(SRfromBatterySolved+3)
+ax4.plot(SRfromPVSolved+4)
+plt.legend(['load SR', 'SR from Grid +2', 'SR from battery +3', 'SR from PV +4'])
+
+
+"""
+Uncomment once want to use again
 #=========Plot filled in color chart============
 x = np.arange(len(loadSRSolved))
 
@@ -645,7 +777,47 @@ plt.title('Asset output power plan, stacked')
 #plt.ylim(-500, 350)
 
 plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure_stacked.png')
+"""
+
+"""
+OLD - COMBINED INTO A SINGLE FIGURE ABOVE
+#Check battery powers
+plt.figure()
+plt.plot(powerBatteryPosSolved, 'r')
+plt.plot(powerBatteryNegSolved)
+plt.plot(powerBatteryPosSolved + powerBatteryNegSolved, 'g')
+plt.legend(['battery pos/charge', 'battery neg/discharge', 'battery net'])
 
 
+plt.figure()
+#plt.plot(powerBatterySolved, 'k', linewidth = 3)
+plt.plot(powerBatteryPosSolved + 5, linewidth = 3)
+#plt.plot(powerBatteryNegSolved - 5, linewidth = 3)
+plt.plot(batteryChargeFromPVSolved - 3)
+plt.plot(batteryChargeFromGridSolved)
+plt.title('Battery power sources and sinks')
+plt.legend([ 'Battery pos', 'battery from PV', 'battery from grid' ])
 
+#Plot where the PV is going - battery or grid
+plt.figure()
+plt.plot(PVtoGridSolved)
+plt.plot(batteryChargeFromPVSolved+2, linewidth=3)
+plt.plot(fcastPV+5)
+plt.legend(['Pv to grid', 'battery charge from PV +2', 'forecast PV +5'])
+
+#look at all contributions to net interconnect constraint
+plt.figure()
+#netInterconnectPower = batteryChargeFromGridSolved +  PVtoGridSolved + loadSRSolved + powerGensetSolved + powerLoadBankSolved
+#-netInterconnectConstraint <= m.powerBatteryNeg[t] + m.batteryChargeFromGrid[t] + m.PVtoGrid[t]  + m.powerGenset[t] + m.powerLoadBank[t] + m.loadSR[t] <= netInterconnectConstraint
+plt.plot(batteryChargeFromGridSolved)
+plt.plot(powerBatteryNegSolved)
+plt.plot(PVtoGridSolved)
+plt.plot(loadSRSolved)
+plt.plot(powerGensetSolved)
+plt.plot(powerLoadBankSolved)
+plt.plot(netInterconnectPower,'k', linewidth = 2.5)
+plt.legend(['battery from grid','battery to grid', 'pv to grid','SR bldg','genset','load bank','net interconnect'])
+plt.title('contributions to net interconnect')
+
+"""
 #=============/Plot results==============================

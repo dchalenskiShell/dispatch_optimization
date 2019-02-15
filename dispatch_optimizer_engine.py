@@ -17,6 +17,7 @@ To implement:
   Marginal cost stack to see what the cost of producing each asset is (approach offer curve)
     In general try to visualize what it's doing better, stacked revenue curve?
   Boolean OR 
+  A source/sink check so that all possible paths for energy/to from an asset are included - this is more of the GUI implementation
   
   TO IMPLEMENT SHORTER TERM
   Comment code
@@ -35,6 +36,20 @@ To implement:
     Plan to change structure of code, going from constraints of import/export to moving terms into the objective function
     Updating/changing variable names
     removed PV curtail and let be solved endogenously
+    
+  2019-02-12
+    Implemented polarity priority convention - highest priority assets according to list below have sources/sinks
+      relative to themselves.  e.g. battery will always have charge/discharge to any other location relative to its import/export 
+      PV will source to SR
+      SR will only consume from grid
+      This was implemented because battery polarity is most confusion (both +/-), so we can orient to most complicated asset
+      Polarity will always be tricky, as a positive PV profile will have to be split into multiple portiont goign in different directions
+      with different polarities (PV charging battery will be seen as battery charge, so +, even though  generating would be -)
+    0) forecasts (e.g. forecasts for any asset are from its perspective, so PV is a gen asset so it will be -, SR is a load so it will be +)
+    1) gen/consume assets (batteries)
+    2) Gen only assets (PV/genset)
+    3) consume only assets (SR, load bank)
+    4) Grid
     
   
 """
@@ -94,32 +109,31 @@ marginalCostGenset =  .0003 #This does not account for gas price, just priority
 #CostToCharge = 1.5 #
 #CostToDischarge = .5 #
 batteryDegrades = False #Do you want to figure in battery degradation?
-enableBattery = True #from TONY
-enablePV = True #from TONY
+enableBattery = True 
+enablePV = False 
 #enablePVCurtail = True #from TONY
-enableGenset = False #from TONY
-enableLoadBank = False #from TONY
-enableSRLoad = True #MAYBE from TONY
-enableNetInterconnectConstraint = True 
+enableGenset = False 
+enableLoadBank = False 
+enableSRLoad = False 
+enableNetInterconnectConstraint = False 
 returnToSOC = True #Need to implement
 enableDCM = True #enable demand charge management - Vestigial
-clipNegPVInput = True
+clipNegPVInput = True #Make sure forecast is always - or 0 (sometimes it goes + by mistake)
 #convertPriceInMWtoKW = False
 enableMarginalCosts = True
 resampleFcastsFiveMins = False
 priceSpike = False
 priceSpikeAmt = 50 #$/MWh for spike
 #Sets all the parameters for the December PoC run
-PoC_run = False
 runOnVM = False
 timeSoCFixed = 178
 
 #BTM paramaters
 #Can PV go straight to SR building or charge battery?
-PVtoBattery = True
-PVtoSR = True
-batteryToSR = False
-gensetToSR = False
+enablePVtoBattery = True
+enablePVtoSR = True
+enableBatteryToSR = False
+enableGensetToSR = False
 
 
 #Read parameters and forecasts files
@@ -155,40 +169,6 @@ epochTime = int(np.round(time.time(),0)) #will come from Tony
 if not enableMarginalCosts:
   marginalCostBattery = marginalCostPV = marginalCostGenset = 0
 
-#overwrite important parameters for PoC
-if PoC_run:
-  #CostToDischarge = .5 #
-  batteryDegrades = True #Do you want to figure in battery degradation?
-  enableBattery = True
-  enablePV = False
-  #enablePVCurtail = False
-  enableGenset = False
-  enableLoadBank = False 
-  enableSRLoad = True 
-  enableNetInterconnectConstraint = True
-  enableMarginalCosts = True
-  netInterconnectConstraint = 100 #kW
-  manipulateLoad = False
-  PVScale = 1
-  battery_sign = -1
-  priceSpike = False
-  
-  createLogfile = True
-  if runOnVM:
-    currFilePath = 'E:/Optimization/' #Don't actually use this on VM, keep here so defined
-    currFileName = 'battery_schedule_lp_test_v2.py'
-    dirLogsOut = 'E:/Optimization/logs/' #where to write the output plan
-    dirPlanOut = 'E:/Optimization/outputs/'
-  else:
-    currFilePath = os.path.dirname(os.path.realpath(__file__))
-    currFileName = 'battery_schedule_lp_test_v2.py'
-  #intervalsPerHour = 12
-  resampleFcastsFiveMins = False
- 
-  now = datetime.datetime.now()
-  dateToday = now.strftime("%Y-%m-%d")
-  rngPoC = pd.date_range(str(dateToday) + ' 06:00:00', periods= len(fcast), freq='5Min') #Add 6 to get time to UTC
-  fcast = fcast.set_index( rngPoC )
 
 #determine number of intervals per hour from input forecast
 #e.g. 15-minute intervals = 4 per hour
@@ -209,41 +189,41 @@ if priceSpike:
   price.loc[time2] = priceSpikeAmt
 """
 
-if not PoC_run:
-  #Setup test forecast cases
-  if False:
-    #Test prices at 0 except 2-hour period in middle of day
-    price.iloc[:] = 0
-    price.iloc[110:150] = 150
-    price.iloc[ 151:250 ] = 75
-  elif False:
-    #Linearly increasing price
-    price.iloc[:] = np.arange( len(fcast ) )
-  elif False:
-    #Response to negative prices
-    price.iloc[:] = 1
-    price.iloc[ 51:75 ] = -50
-  elif False:
-    #Respond to positive and negative prices
-    price.iloc[:] = 20
-    #price.iloc[ 21:36 ] = -50 
-    price.iloc[ 51:150 ] = 50
-  elif True:
-    #Respond to positive and negative prices
-    price.iloc[:] = 15
-    #price.iloc[ 21:36 ] = 50 
-    price.iloc[ 120:180 ] = 50
-    price.iloc[ 180:210 ] = 75
-    price.iloc[ 210: ] = 50
-  elif False:
-    #constant price throughout period
-    price.iloc[:] = 50
-  elif False:
-    #Respond to positive and negative prices
-    price.iloc[:] = 5
-    price.iloc[ 15:25 ] = -50 
-    price.iloc[ 51:71 ] = 45
-    price.iloc[ 71:80 ] = 50
+
+#Setup test forecast cases
+if False:
+  #Test prices at 0 except 2-hour period in middle of day
+  price.iloc[:] = 0
+  price.iloc[110:150] = 150
+  price.iloc[ 151:250 ] = 75
+elif False:
+  #Linearly increasing price
+  price.iloc[:] = np.arange( len(fcast ) )
+elif False:
+  #Response to negative prices
+  price.iloc[:] = 1
+  price.iloc[ 51:75 ] = -50
+elif False:
+  #Respond to positive and negative prices
+  price.iloc[:] = 20
+  #price.iloc[ 21:36 ] = -50 
+  price.iloc[ 51:150 ] = 50
+elif False:
+  #Respond to positive and negative prices
+  price.iloc[:] = 15
+  #price.iloc[ 21:36 ] = 50 
+  price.iloc[ 120:180 ] = 50
+  price.iloc[ 180:210 ] = 75
+  price.iloc[ 210: ] = 50
+elif True:
+  #constant price throughout period
+  price.iloc[:] = 50
+elif False:
+  #Respond to positive and negative prices
+  price.iloc[:] = 5
+  price.iloc[ 15:25 ] = -50 
+  price.iloc[ 51:71 ] = 45
+  price.iloc[ 71:80 ] = 50
 
 
 
@@ -305,24 +285,23 @@ fcastPV.index = np.arange( len(fcast) )
 
 fcastPV.head()
 
-if not PoC_run:
-  #Setup test forecast cases
-  if True:
-    #Test prices at 0 except 2-hour period in middle of day
-    fcastPV[:] = 0
-    fcastPV[110:150] = -1500
-    fcastPV[ 150:250 ] = -375
-  elif False:
-    #Linearly increasing price
-    fcastPV[:] = np.arange( len(fcast ) )
-  elif False:
-    fcastPV[:] = 0
-    fcastPV[110:150] = -150
-    fcastPV[ 151:250 ] = -75
-  elif False:
-    fcastPV[:] = 0
-    fcastPV[110:150] = -150
-    fcastPV[ 151:250 ] = -75
+#Setup test forecast cases
+if False:
+  #Test prices at 0 except 2-hour period in middle of day
+  fcastPV[:] = 0
+  fcastPV[110:150] = -1500
+  fcastPV[ 150:250 ] = -375
+elif False:
+  #Linearly increasing price
+  fcastPV[:] = np.arange( len(fcast ) )
+elif False:
+  fcastPV[:] = 0
+  fcastPV[110:150] = -150
+  fcastPV[ 151:250 ] = -75
+elif False:
+  fcastPV[:] = 0
+  fcastPV[110:150] = -150
+  fcastPV[ 151:250 ] = -75
     
 fcastPV.head()
     
@@ -341,64 +320,45 @@ m = en.ConcreteModel()
 #keep Python ordering by starting at 0
 m.T = en.RangeSet(0, len(priceDict) - 1 )
 
-# PARAMETERS
+#=========PARAMETERS===========
 # # Real Time Price forecast, time t
+# Don't use enable/disable on these, the forecasts should always be valid
 m.price = en.Param(m.T, within = en.Reals, initialize = priceDict)
 m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
-m.fcastPV = en.Param(m.T, within = en.Reals, initialize = fcastPVDict)
+m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, initialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
   
-#VARIABLES
-#Discharge power (note this is obviously instantaneous, not scaled for 15 minute interval)
+#==========VARIABLES=============
+#Order in terms of polarity priority as defined above, 1) consume/gen ; 2) gen only ; 3) comsume only ; 4) grid
+#First asset in variable name determines which has polarity priority: PVtoGrid is from PV's perspective, so a + number because gen
+#All numbers are discharge power (note this is obviously instantaneous, not energy scaled for interval duration)
 #Initialize most to 0 so final iteration remains finite
 #OLD#m.powerBattery = en.Var( m.T, bounds=(-powerBatteryMax, powerBatteryMax), initialize = 0 )
 m.SOC = en.Var(m.T, bounds=(SOCMin, SOCMax) ) 
-if enableBattery:
-  m.powerBatteryPos = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
-  m.powerBatteryNeg = en.Var( m.T, bounds=(-powerBatteryMax, 0), initialize = 0 )
-  m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
-else:
-  m.powerBatteryPos = en.Var( m.T, bounds=(0, 0), initialize = 0 )
-  m.powerBatteryNeg = en.Var( m.T, bounds=(0, 0), initialize = 0 )
-  m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, 0), initialize = 0 )
+m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, powerBatteryMax * enableBattery), initialize = 0 ) 
+m.batteryDischargeToGrid = en.Var( m.T, bounds=( -powerBatteryMax * enableBattery, 0 ), initialize = 0 ) 
+m.batteryChargeFromPV = en.Var( m.T, bounds=(0, powerBatteryMax * enableBattery * enablePV * enablePVtoBattery), initialize = 0 ) 
+m.batteryDischargeToSR = en.Var( m.T, bounds=(-powerBatteryMax * enableBattery * enableSRLoad * enableBatteryToSR, 0 ), initialize = 0 ) 
+#m.batteryChargingBool = en.Var( m.T, within = en.Boolean , initialize = 0 ) #Does this need to be implemented somehow?* enableBattery
+#m.batteryDischargingBool = en.Var( m.T, within = en.Boolean , initialize = 0 ) #* enableBattery
+m.batteryChargingBool = en.Var( m.T, domain = en.Integers, initialize = 0 ) #Does this need to be implemented somehow?* enableBattery
+m.batteryDischargingBool = en.Var( m.T, domain = en.Integers, initialize = 0 ) #* enableBattery
+m.powerBatteryNetPos = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 ) #* enableBattery #Net Consume/charge
+m.powerBatteryNetNeg = en.Var( m.T, bounds=(-powerBatteryMax, 0), initialize = 0 ) #* enableBattery#Generate/Discharge
 
-if enableLoadBank:
-  m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax ), initialize = 0 )
-else:
-  m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax ), initialize = 0 )
+m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax * enableLoadBank), initialize = 0 ) 
 
-#if enablePVCurtail:
-#  m.booleanPV = en.Var( m.T, within = en.Boolean , initialize = enablePV )
-#else:
-#  m.booleanPV = en.Var( m.T, bounds = (True , True) , initialize = enablePV )
+m.powerGenset = en.Var( m.T, bounds=( -powerGensetMax * enableGenset, 0 ), initialize = 0 ) 
+#Will need a NET, then GenSet to SR, GenSet from Battery (which will go in battery section due to priority rules), Genset to Grid
 
-if enableGenset:
-  m.powerGenset = en.Var( m.T, bounds=( -powerGensetMax, 0 ), initialize = 0 )
-else:
-  m.powerGenset = en.Var( m.T, bounds=( 0, 0 ), initialize = 0 )
-#OLD#m.powerImport = en.Var( m.T, initialize = 0 )
-#OLD#m.powerExport = en.Var( m.T, initialize = 0 ) #IS THERE WHERE WE WANT TO IMPOSE EXPORT CONSTRAINT???
-#New below after December PoC completed
+m.PVtoGrid = en.Var( m.T, bounds=(-powerPVMax * enablePV, 0), initialize = 0 ) 
+m.PVtoSR = en.Var( m.T, bounds=(-powerPVMax * enablePV * enableSRLoad * enablePVtoSR, 0), initialize = 0 ) 
 
-
-if enablePV:
-  m.batteryChargeFromPV = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 )
-  m.PVtoGrid = en.Var( m.T, bounds=(-powerPVMax, 0), initialize = 0 )
-else:
-  m.batteryChargeFromPV = en.Var( m.T, bounds=(0, 0), initialize = 0 )
-  m.PVtoGrid = en.Var( m.T, bounds=(0, 0), initialize = 0 )
-
-m.SRfromPV = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
+#m.SRfromPV = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
 m.SRfromGrid = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
-m.SRfromBattery = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
-
-#if enablePV:
-#  m.powerPV = en.Var( m.T, bounds=(0, powerPVMax), initialize = fcastPVDict )  #REALLLYYYY??????????
-#else:
-#  m.powerPV = en.Var( m.T, bounds=(0, powerPVMax), initialize = 0 )
 
 #OBJECTIVE STATEMENT
-"""things this may not do yet:
-turn PV off
+"""things this does not do yet:
+turn PV off 
 return to SOC
 """
 def Total_cost(model):
@@ -406,28 +366,31 @@ def Total_cost(model):
   #note: 0.000001 additions below were just to ensure not div/0 when testing price=0
   return sum(   
     (
+    #SR building consume from grid
+    + m.SRfromGrid[t]
+    #===Battery Rules===
     #battery supply/discharge to grid
-    ( m.powerBatteryNeg[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
+    ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
     #Battery consume/charge from PV at grid price
     + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
-    #Battery consume/charge from PV at ~0 marginal cost
-    + ( m.batteryChargeFromPV[t] * ( ( marginalCostBattery + marginalCostPV ) /  ( m.price[t] + 0.000001) ) ) * PVtoBattery
-    #PV supply to grid
-    + m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) \
-    #Genset supply to grid
-    + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) )
-    #SR building consume from grid
-    + m.SRfromGrid[t]  
-    #SR consume from PV
-    + ( m.SRfromPV[t] * ( marginalCostPV /  ( m.price[t] + 0.000001) ) ) * PVtoSR
     #SR consume from Battery
-    + ( m.SRfromBattery[t] * ( ( marginalCostPV + marginalCostBattery ) /  ( m.price[t] + 0.000001) ) ) * batteryToSR
+    + ( m.batteryDischargeToSR[t] * ( ( marginalCostPV + marginalCostBattery ) /  ( m.price[t] + 0.000001) ) ) 
+    #Battery consume/charge from PV at ~0 marginal cost
+    + ( m.batteryChargeFromPV[t] * ( ( marginalCostBattery + marginalCostPV ) /  ( m.price[t] + 0.000001) ) ) 
+    #PV supply to grid
+    + ( m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) ) \
+    #SR consume from PV
+    + ( m.PVtoSR[t] * ( marginalCostPV /  ( m.price[t] + 0.000001) ) ) 
+
+    #Genset supply to grid - ALGEBRA DOESN"T LOOK RIGHT HERE, CHECK LATER
+    + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) )
+    
     #Load bank consume from grid
     + m.powerLoadBank[t]
-    ) * m.price[t]
+    ) * m.price[t] 
     #NOT SURE IF BELOW WORK PROPERLY
-    + ( m.powerBatteryPos[t] * degradationCostSlope * enableBattery ) 
-    - ( m.powerBatteryNeg[t] * degradationCostSlope * enableBattery )
+    + ( m.powerBatteryNetPos[t] * degradationCostSlope * batteryDegrades) 
+    - ( m.powerBatteryNetNeg[t] * degradationCostSlope * batteryDegrades)
     for t in m.T)
 m.OBJ = en.Objective(rule=Total_cost, sense = en.minimize)
 
@@ -441,7 +404,7 @@ def State(m, t):
 #    if t == timeSoCFixed:
 #        return m.SOC[t] == SOC_fixed   #Initialize at 50% SOC  #100 + m.powerBattery[t]
     else:        
-      return m.SOC[t] == m.SOC[t-1] + ( enableBattery * (m.powerBatteryNeg[t-1] + m.powerBatteryPos[t-1]) / intervalsPerHour )   
+      return m.SOC[t] == m.SOC[t-1] + ( enableBattery * (m.powerBatteryNetNeg[t-1] + m.powerBatteryNetPos[t-1]) / intervalsPerHour )   
 m.State_of_charge = en.Constraint(m.T, rule = State)
 
 """
@@ -467,33 +430,54 @@ def power_import(m, t):
 m.powerImportConst = en.Constraint(m.T, rule = power_import)
 """
 
-#Battery charge from any source cannot exceed max power
+#Net battery pos (charge)
+def battery_charge_net(m, t):
+  return m.powerBatteryNetPos[t] == m.batteryChargeFromGrid[t] + m.batteryChargeFromPV[t]
+m.batteryChargeNetConst = en.Constraint(m.T, rule = battery_charge_net )
+
+
+#net battery neg (discharge)
+def battery_discharge_net(m, t):
+  return m.powerBatteryNetNeg[t] == m.batteryDischargeToGrid[t] + m.batteryDischargeToSR[t]
+m.batteryDischargeNetConst = en.Constraint(m.T, rule = battery_discharge_net )
+
+#battery charge can't exceed max power
 def battery_charge_max(m, t):
-  return m.powerBatteryPos[t] == m.batteryChargeFromGrid[t] + m.batteryChargeFromPV[t]
-m.batteryChargeConst = en.Constraint(m.T, rule = battery_charge_max )
+  return powerBatteryMax >= m.powerBatteryNetPos[t] * m.batteryDischargingBool[t]
+m.batteryChargeMaxConst = en.Constraint(m.T, rule = battery_charge_max )
+
+#battery discharge can't exceed max power
+def battery_discharge_max(m, t):
+  return -powerBatteryMax <= m.powerBatteryNetNeg[t] * m.batteryChargingBool[t]
+m.batteryDischargeMaxConst = en.Constraint(m.T, rule = battery_discharge_max )
+
+#Battery can't charge and discharge in same period
+def battery_charge_or_discharge(m, t):
+  return m.batteryDischargingBool[t] + m.batteryChargingBool[t] <= 1 
+m.batteryOnlyChargeorDischarge = en.Constraint(m.T, rule = battery_charge_or_discharge )
 
 
 #Load of SR building must be met but source can be battery, grid or PV
 def SR_consume_conservation(m, t):
-  return m.loadSR[t] == m.SRfromPV[t] + m.SRfromGrid[t] + m.SRfromBattery[t]
+  return m.loadSR[t] == -m.PVtoSR[t] + m.SRfromGrid[t] + m.batteryDischargeToSR[t]
 m.SRConserveConst = en.Constraint(m.T, rule = SR_consume_conservation )
 
-
 #Can't commit to using more PV than available from forecast
-#The elements are different sign (battery charge and PY discharge), hence negative
-def PV_commit_max(m, t ):
-  return m.fcastPV[t] <= m.PVtoGrid[t] - m.batteryChargeFromPV[t]
+#The elements are different sign (battery charge and PV discharge), hence negative
+def PV_commit_max(m, t):
+  return m.fcastPV[t] <= m.PVtoSR[t] + m.PVtoGrid[t] - m.batteryChargeFromPV[t]
 m.PVcommitConst = en.Constraint(m.T, rule = PV_commit_max )
 
 
 if enableNetInterconnectConstraint:
   def net_export_constraint(m, t):
-    return -netInterconnectConstraint <= m.powerBatteryNeg[t] + m.batteryChargeFromGrid[t] + m.PVtoGrid[t]  + m.powerGenset[t] + m.powerLoadBank[t] + m.loadSR[t] <= netInterconnectConstraint
+    return -netInterconnectConstraint <= m.batteryDischargeToGrid[t] + m.batteryChargeFromGrid[t] + m.PVtoGrid[t]  + m.powerGenset[t] + m.powerLoadBank[t] + m.SRfromGrid[t] <= netInterconnectConstraint
   m.netInterconnectConstraint = en.Constraint(m.T, rule = net_export_constraint)
 
 #=============Solve the model==========================
 from pyomo.opt import SolverFactory
-opt = SolverFactory('glpk')
+#opt = SolverFactory('glpk')
+opt = SolverFactory('ipopt') #for MILP
 
 print('duration of initialization prior to solve: ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 start = timer()
@@ -507,22 +491,34 @@ print('duration of solve : ' + str(np.round( timer() - start , 2) ) + ' seconds'
 
 #=============Retrieve results==============================
 SOCSolved = np.zeros( (len(price)) )
-powerBatterySolved = np.zeros( (len(price)) )
-powerBatteryNegSolved = np.zeros( (len(price)) )
-powerBatteryPosSolved = np.zeros( (len(price)) )
-powerLoadBankSolved = np.zeros( (len(price)) )
-loadSRSolved = np.zeros( (len(price)) )
-powerGensetSolved = np.zeros( (len(price)) )
-powerImportSolved = np.zeros( (len(price)) )
-powerExportSolved = np.zeros( (len(price)) )
 batteryChargeFromGridSolved = np.zeros( (len(price)) )
+batteryDischargeToGridSolved= np.zeros( (len(price)) )
 batteryChargeFromPVSolved = np.zeros( (len(price)) )
+batteryDischargeToSRSolved = np.zeros( (len(price)) )
+batteryChargingBoolSolved = np.zeros( (len(price)) )
+batteryDischargingBoolSolved = np.zeros( (len(price)) )
+powerBatteryNetPosSolved = np.zeros( (len(price)) )
+powerBatteryNetNegSolved = np.zeros( (len(price)) )
+powerLoadBankSolved = np.zeros( (len(price)) )
+powerGensetSolved = np.zeros( (len(price)) )
 PVtoGridSolved = np.zeros( (len(price)) )
+PVtoSRSolved = np.zeros( (len(price)) )
+SRfromGridSolved = np.zeros( (len(price)) )
+
+
+
+powerBatterySolved 
+
+loadSRSolved 
+powerGensetSolved 
+powerImportSolved 
+powerExportSolved 
+
 booleanPVSolved = np.zeros( (len(price)) )
+
 priceSolved = np.zeros( (len(price)) )
 netInterconnectPower = np.zeros( (len(price)) )
-SRfromPVSolved = np.zeros( (len(price)) )
-SRfromGridSolved = np.zeros( (len(price)) )
+
 SRfromBatterySolved = np.zeros( (len(price)) )
 #negPriceOut = np.zeros( (len(price)) )
 #posPriceOut = np.zeros( (len(price)) )
@@ -543,27 +539,34 @@ for v in m.component_objects(en.Var, active=True):
         if j == 0:
           SOCSolved[index] = en.value(v[index])
         elif j == 1:
-          powerBatteryPosSolved[index] = en.value(v[index])
-        elif j == 2:
-          powerBatteryNegSolved[index] = en.value(v[index])
-        elif j == 3:
           batteryChargeFromGridSolved[index] = en.value(v[index])
-        elif j == 4:
-          powerLoadBankSolved[index] = en.value(v[index])
-        elif j == 5:
-          powerGensetSolved[index] = en.value(v[index])
-        elif j == 6:
+        elif j == 2:
+          batteryDischargeToGridSolved[index] = en.value(v[index])
+          powerBatteryNetNegSolved[index] 
+        elif j == 3:
           batteryChargeFromPVSolved[index] = en.value(v[index])
+        elif j == 4:
+          batteryDischargeToSRSolved[index] = en.value(v[index])
+        elif j == 5:
+          batteryChargingBoolSolved[index] = en.value(v[index])
+        elif j == 6:
+          batteryDischargingBoolSolved[index] = en.value(v[index])
         elif j == 7:
-          PVtoGridSolved[index] = en.value(v[index])
+          powerBatteryNetPosSolved[index] = en.value(v[index])
         elif j == 8:
-          SRfromPVSolved[index] = en.value(v[index])
+          powerBatteryNetNegSolved[index] = en.value(v[index])
         elif j == 9:
-          SRfromGridSolved[index] = en.value(v[index])
+          powerLoadBankSolved[index] = en.value(v[index])
         elif j == 10:
-          SRfromBatterySolved[index] = en.value(v[index])
+          powerGensetSolved[index] = en.value(v[index])
+        elif j == 11:
+          PVtoGridSolved[index] = en.value(v[index])
+        elif j == 12:
+          PVtoSRSolved[index] = en.value(v[index])
+        elif j == 13:
+          SRfromGridSolved[index] = en.value(v[index])
     j+=1
-        
+      
 #access parameters (to double check)
 #Don't really need neg and pos since they are just the sign-separated price
 j = 0
@@ -581,24 +584,24 @@ for parmobject in m.component_objects(en.Param, active=True):
       
 SOCSolvedPercent = SOCSolved / SOCMax
 
-scheduledPVSolved = PVtoGridSolved - batteryChargeFromPVSolved - SRfromPVSolved 
+scheduledPVSolved = PVtoGridSolved + PVtoSRSolved - batteryChargeFromPVSolved
 
 #Consistency check
-a = powerBatteryPosSolved > 0  
-b = powerBatteryNegSolved > 0
+a = powerBatteryNetPosSolved > 0  
+b = powerBatteryNetNegSolved > 0
 batteryError = np.sum(a*b)
 if batteryError:
   print('WARNING: YOU SEEM TO HAVE A TIME WHEN THE BATTERY WANTED TO CHARGE AND DISCHARGE SIMULTANEOUSLY!!!')
   print('Continuing on...')
 
 #Compile power out from power out pos and power out neg
-powerBatterySolved = ( powerBatteryPosSolved + powerBatteryNegSolved )
+powerBatterySolved = ( powerBatteryNetPosSolved + powerBatteryNetNegSolved )
 
 #Calculate revenue/cost
-netCashBattery = -priceSolved * ( batteryChargeFromGridSolved + powerBatteryNegSolved ) / intervalsPerHour / 1000 #div by 1000 bc price in MW
+netCashBattery = -priceSolved * ( batteryChargeFromGridSolved + powerBatteryNetNegSolved ) / intervalsPerHour / 1000 #div by 1000 bc price in MW
 #Battery revenue + load bank revenue + solar revenue - SR load costs
 netCashTotal = -( \
-        ( priceSolved * ( batteryChargeFromGridSolved + powerBatteryNegSolved ) / intervalsPerHour ) \
+        ( priceSolved * ( batteryChargeFromGridSolved + powerBatteryNetNegSolved ) / intervalsPerHour ) \
         + (priceSolved * powerLoadBankSolved / intervalsPerHour) \
         + (priceSolved * PVtoGridSolved / intervalsPerHour) \
         + (priceSolved * SRfromGridSolved / intervalsPerHour) \
@@ -616,7 +619,7 @@ cashflowBattery = np.cumsum(netCashBattery)
 
 print('Average state of charge throughour period is: ' + str(np.round(100*np.average(SOCSolvedPercent))) + '%')
 
-netInterconnectPower = powerBatteryNegSolved + batteryChargeFromGridSolved +  PVtoGridSolved + loadSRSolved + powerGensetSolved + powerLoadBankSolved
+netInterconnectPower = powerBatteryNetNegSolved + batteryChargeFromGridSolved +  PVtoGridSolved + loadSRSolved + powerGensetSolved + powerLoadBankSolved
 
 #=============/Retrieve results==============================
 
@@ -698,15 +701,15 @@ plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure.png')
 #fig, ax = plt.subplots(2,2, figsize = (12,12))
 fig = plt.figure(figsize = (16,16))
 ax1 = fig.add_subplot(321)
-ax1.plot(powerBatteryPosSolved, 'r')
-ax1.plot(powerBatteryNegSolved)
-ax1.plot(powerBatteryPosSolved + powerBatteryNegSolved, 'g')
+ax1.plot(powerBatteryNetPosSolved, 'r')
+ax1.plot(powerBatteryNetNegSolved)
+ax1.plot(powerBatteryNetPosSolved + powerBatteryNetNegSolved, 'g')
 plt.legend(['battery pos/charge', 'battery neg/discharge', 'battery net'])
 
 ax2 = fig.add_subplot(322)
 #plt.plot(powerBatterySolved, 'k', linewidth = 3)
-ax2.plot(powerBatteryPosSolved + 5, linewidth = 3)
-#plt.plot(powerBatteryNegSolved - 5, linewidth = 3)
+ax2.plot(powerBatteryNetPosSolved + 5, linewidth = 3)
+#plt.plot(powerBatteryNetNegSolved - 5, linewidth = 3)
 ax2.plot(batteryChargeFromPVSolved - 3)
 ax2.plot(batteryChargeFromGridSolved)
 ax2.set_title('Battery power sources and sinks')
@@ -721,7 +724,7 @@ plt.legend(['Pv to grid', 'battery charge from PV +2', 'forecast PV +5'])
 
 ax4 = fig.add_subplot(324)
 ax4.plot(batteryChargeFromGridSolved)
-ax4.plot(powerBatteryNegSolved)
+ax4.plot(powerBatteryNetNegSolved)
 ax4.plot(PVtoGridSolved)
 ax4.plot(loadSRSolved)
 ax4.plot(powerGensetSolved)
@@ -733,8 +736,8 @@ ax4.set_title('contributions to net interconnect')
 ax4 = fig.add_subplot(325)
 ax4.plot(loadSRSolved, linewidth=3)
 ax4.plot(SRfromGridSolved+2)
-ax4.plot(SRfromBatterySolved+3)
-ax4.plot(SRfromPVSolved+4)
+ax4.plot(batteryDischargeToSRSolved+3)
+ax4.plot(PVtoSRSolved+4)
 plt.legend(['load SR', 'SR from Grid +2', 'SR from battery +3', 'SR from PV +4'])
 
 
@@ -783,16 +786,16 @@ plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure_stacked.png')
 OLD - COMBINED INTO A SINGLE FIGURE ABOVE
 #Check battery powers
 plt.figure()
-plt.plot(powerBatteryPosSolved, 'r')
-plt.plot(powerBatteryNegSolved)
-plt.plot(powerBatteryPosSolved + powerBatteryNegSolved, 'g')
+plt.plot(powerBatteryNetPosSolved, 'r')
+plt.plot(powerBatteryNetNegSolved)
+plt.plot(powerBatteryNetPosSolved + powerBatteryNetNegSolved, 'g')
 plt.legend(['battery pos/charge', 'battery neg/discharge', 'battery net'])
 
 
 plt.figure()
 #plt.plot(powerBatterySolved, 'k', linewidth = 3)
-plt.plot(powerBatteryPosSolved + 5, linewidth = 3)
-#plt.plot(powerBatteryNegSolved - 5, linewidth = 3)
+plt.plot(powerBatteryNetPosSolved + 5, linewidth = 3)
+#plt.plot(powerBatteryNetNegSolved - 5, linewidth = 3)
 plt.plot(batteryChargeFromPVSolved - 3)
 plt.plot(batteryChargeFromGridSolved)
 plt.title('Battery power sources and sinks')
@@ -810,7 +813,7 @@ plt.figure()
 #netInterconnectPower = batteryChargeFromGridSolved +  PVtoGridSolved + loadSRSolved + powerGensetSolved + powerLoadBankSolved
 #-netInterconnectConstraint <= m.powerBatteryNeg[t] + m.batteryChargeFromGrid[t] + m.PVtoGrid[t]  + m.powerGenset[t] + m.powerLoadBank[t] + m.loadSR[t] <= netInterconnectConstraint
 plt.plot(batteryChargeFromGridSolved)
-plt.plot(powerBatteryNegSolved)
+plt.plot(powerBatteryNetNegSolved)
 plt.plot(PVtoGridSolved)
 plt.plot(loadSRSolved)
 plt.plot(powerGensetSolved)

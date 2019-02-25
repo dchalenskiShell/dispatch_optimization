@@ -65,6 +65,7 @@ from timeit import default_timer as timer
 import os
 import pandas as pd
 import broken_barh_plot
+from pyomo.opt import SolverFactory
 #from pyomo.core import Var
 #import pprint
 
@@ -114,10 +115,10 @@ enablePV = False
 #enablePVCurtail = True #from TONY
 enableGenset = False 
 enableLoadBank = False 
-enableSRLoad = False 
+enableSRLoad = True 
 enableNetInterconnectConstraint = False 
-returnToSOC = True #Need to implement
-enableDCM = True #enable demand charge management - Vestigial
+returnToSOC = False #Need to implement
+enableDCM = False #enable demand charge management - Vestigial
 clipNegPVInput = True #Make sure forecast is always - or 0 (sometimes it goes + by mistake)
 #convertPriceInMWtoKW = False
 enableMarginalCosts = True
@@ -130,8 +131,8 @@ timeSoCFixed = 178
 
 #BTM paramaters
 #Can PV go straight to SR building or charge battery?
-enablePVtoBattery = True
-enablePVtoSR = True
+enablePVtoBattery = False
+enablePVtoSR = False
 enableBatteryToSR = False
 enableGensetToSR = False
 
@@ -199,10 +200,10 @@ if False:
 elif False:
   #Linearly increasing price
   price.iloc[:] = np.arange( len(fcast ) )
-elif False:
+elif True:
   #Response to negative prices
   price.iloc[:] = 1
-  price.iloc[ 51:75 ] = -50
+  price.iloc[ 51:75 ] = 50
 elif False:
   #Respond to positive and negative prices
   price.iloc[:] = 20
@@ -215,7 +216,7 @@ elif False:
   price.iloc[ 120:180 ] = 50
   price.iloc[ 180:210 ] = 75
   price.iloc[ 210: ] = 50
-elif True:
+elif False:
   #constant price throughout period
   price.iloc[:] = 50
 elif False:
@@ -224,9 +225,6 @@ elif False:
   price.iloc[ 15:25 ] = -50 
   price.iloc[ 51:71 ] = 45
   price.iloc[ 71:80 ] = 50
-
-
-
 
 #powerLoadBank = fcast['fc_solar_kw'].copy()
 
@@ -370,7 +368,7 @@ def Total_cost(model):
     + m.SRfromGrid[t]
     #===Battery Rules===
     #battery supply/discharge to grid
-    ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
+    + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
     #Battery consume/charge from PV at grid price
     + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
     #SR consume from Battery
@@ -381,10 +379,8 @@ def Total_cost(model):
     + ( m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) ) \
     #SR consume from PV
     + ( m.PVtoSR[t] * ( marginalCostPV /  ( m.price[t] + 0.000001) ) ) 
-
     #Genset supply to grid - ALGEBRA DOESN"T LOOK RIGHT HERE, CHECK LATER
     + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) )
-    
     #Load bank consume from grid
     + m.powerLoadBank[t]
     ) * m.price[t] 
@@ -443,12 +439,12 @@ m.batteryDischargeNetConst = en.Constraint(m.T, rule = battery_discharge_net )
 
 #battery charge can't exceed max power
 def battery_charge_max(m, t):
-  return powerBatteryMax >= m.powerBatteryNetPos[t] * m.batteryDischargingBool[t]
+  return m.powerBatteryNetPos[t] <= powerBatteryMax * m.batteryChargingBool[t]
 m.batteryChargeMaxConst = en.Constraint(m.T, rule = battery_charge_max )
 
 #battery discharge can't exceed max power
 def battery_discharge_max(m, t):
-  return -powerBatteryMax <= m.powerBatteryNetNeg[t] * m.batteryChargingBool[t]
+  return m.powerBatteryNetNeg[t] >= -powerBatteryMax * m.batteryDischargingBool[t]
 m.batteryDischargeMaxConst = en.Constraint(m.T, rule = battery_discharge_max )
 
 #Battery can't charge and discharge in same period
@@ -471,13 +467,20 @@ m.PVcommitConst = en.Constraint(m.T, rule = PV_commit_max )
 
 if enableNetInterconnectConstraint:
   def net_export_constraint(m, t):
-    return -netInterconnectConstraint <= m.batteryDischargeToGrid[t] + m.batteryChargeFromGrid[t] + m.PVtoGrid[t]  + m.powerGenset[t] + m.powerLoadBank[t] + m.SRfromGrid[t] <= netInterconnectConstraint
+    return -netInterconnectConstraint <= (
+      m.batteryDischargeToGrid[t] 
+      + m.batteryChargeFromGrid[t] 
+      + m.PVtoGrid[t]  
+      + m.powerGenset[t] 
+      + m.powerLoadBank[t] 
+      + m.SRfromGrid[t]
+      ) <= netInterconnectConstraint
   m.netInterconnectConstraint = en.Constraint(m.T, rule = net_export_constraint)
 
 #=============Solve the model==========================
-from pyomo.opt import SolverFactory
-#opt = SolverFactory('glpk')
-opt = SolverFactory('ipopt') #for MILP
+
+opt = SolverFactory('glpk', tee = True)
+#opt = SolverFactory('ipopt') #for MILP
 
 print('duration of initialization prior to solve: ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 start = timer()
@@ -504,15 +507,9 @@ powerGensetSolved = np.zeros( (len(price)) )
 PVtoGridSolved = np.zeros( (len(price)) )
 PVtoSRSolved = np.zeros( (len(price)) )
 SRfromGridSolved = np.zeros( (len(price)) )
+loadSRSolved = np.zeros( (len(price)) )
 
-
-
-powerBatterySolved 
-
-loadSRSolved 
-powerGensetSolved 
-powerImportSolved 
-powerExportSolved 
+#powerBatterySolved 
 
 booleanPVSolved = np.zeros( (len(price)) )
 
@@ -701,9 +698,9 @@ plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure.png')
 #fig, ax = plt.subplots(2,2, figsize = (12,12))
 fig = plt.figure(figsize = (16,16))
 ax1 = fig.add_subplot(321)
-ax1.plot(powerBatteryNetPosSolved, 'r')
-ax1.plot(powerBatteryNetNegSolved)
-ax1.plot(powerBatteryNetPosSolved + powerBatteryNetNegSolved, 'g')
+ax1.plot(powerBatteryNetPosSolved + 3, 'r')
+ax1.plot(powerBatteryNetNegSolved + 5)
+ax1.plot(powerBatteryNetPosSolved + powerBatteryNetNegSolved + 7, 'g')
 plt.legend(['battery pos/charge', 'battery neg/discharge', 'battery net'])
 
 ax2 = fig.add_subplot(322)
@@ -733,12 +730,19 @@ ax4.plot(netInterconnectPower,'k', linewidth = 2.5)
 plt.legend(['battery from grid','battery to grid', 'pv to grid','SR bldg','genset','load bank','net interconnect'])
 ax4.set_title('contributions to net interconnect')
 
-ax4 = fig.add_subplot(325)
-ax4.plot(loadSRSolved, linewidth=3)
-ax4.plot(SRfromGridSolved+2)
-ax4.plot(batteryDischargeToSRSolved+3)
-ax4.plot(PVtoSRSolved+4)
+ax5 = fig.add_subplot(325)
+ax5.plot(loadSRSolved, linewidth=3)
+ax5.plot(SRfromGridSolved+2)
+ax5.plot(batteryDischargeToSRSolved+3)
+ax5.plot(PVtoSRSolved+4)
 plt.legend(['load SR', 'SR from Grid +2', 'SR from battery +3', 'SR from PV +4'])
+
+ax6 = fig.add_subplot(326)
+ax6.plot(batteryChargingBoolSolved)
+ax6.plot(batteryDischargingBoolSolved)
+plt.legend(['charging boolean', 'discharging boolean'])
+
+
 
 
 """

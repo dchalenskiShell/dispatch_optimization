@@ -98,7 +98,7 @@ PVScale = 5
 PVRoundTripEfficiency = 1
 gensetHeatRate = 9.8
 costGas = 3 #($/MWh)
-netInterconnectConstraint = 200 #kW
+
 #Marginal costs are currently used to prioritize these assets
 #Higher marginal costs forces that asset to curtail over lower marginal cost assets
 #This is currently not figured in to the actual revenue calculations
@@ -109,14 +109,26 @@ marginalCostPV = .0001 #PV has the highest priority, lowest marginal cost
 marginalCostGenset =  .0003 #This does not account for gas price, just priority
 #CostToCharge = 1.5 #
 #CostToDischarge = .5 #
-batteryDegrades = False #Do you want to figure in battery degradation?
+
 enableBattery = True 
-enablePV = False 
+batteryDegrades = False #Do you want to figure in battery degradation?
+enableBatteryToSR = False
+
+enablePV = True 
+enableBatteryFromGrid = True
+enablePVtoBattery = True
+enablePVtoSR = False
 #enablePVCurtail = True #from TONY
-enableGenset = False 
+
+enableGenset = False
+enableGensetToSR = False
+ 
 enableLoadBank = False 
-enableSRLoad = True 
-enableNetInterconnectConstraint = False 
+enableSRLoad = False 
+
+enableNetInterconnectConstraint = True 
+netInterconnectConstraint = 100 #kW
+
 returnToSOC = False #Need to implement
 enableDCM = False #enable demand charge management - Vestigial
 clipNegPVInput = True #Make sure forecast is always - or 0 (sometimes it goes + by mistake)
@@ -129,13 +141,9 @@ priceSpikeAmt = 50 #$/MWh for spike
 runOnVM = False
 timeSoCFixed = 178
 
-#BTM paramaters
-#Can PV go straight to SR building or charge battery?
-enablePVtoBattery = False
-enablePVtoSR = False
-enableBatteryToSR = False
-enableGensetToSR = False
-
+#This is just a spoof to test demand charges on the SR building to ensure functionality of battery to SR
+DCMChargeSpoof = 5 
+RTPrice_boost = 0 #small modifier to RTMPrice to keep 0 price from blowing up. Delete when done testing
 
 #Read parameters and forecasts files
 if runOnVM:
@@ -202,8 +210,9 @@ elif False:
   price.iloc[:] = np.arange( len(fcast ) )
 elif True:
   #Response to negative prices
-  price.iloc[:] = 1
+  price.iloc[:] = 10
   price.iloc[ 51:75 ] = 50
+  price.iloc[ 150:200 ] = 75
 elif False:
   #Respond to positive and negative prices
   price.iloc[:] = 20
@@ -211,7 +220,7 @@ elif False:
   price.iloc[ 51:150 ] = 50
 elif False:
   #Respond to positive and negative prices
-  price.iloc[:] = 15
+  price.iloc[:] = 10
   #price.iloc[ 21:36 ] = 50 
   price.iloc[ 120:180 ] = 50
   price.iloc[ 180:210 ] = 75
@@ -326,13 +335,13 @@ m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
 m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, initialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
   
 #==========VARIABLES=============
-#Order in terms of polarity priority as defined above, 1) consume/gen ; 2) gen only ; 3) comsume only ; 4) grid
+#Convention order in terms of polarity priority as defined above, 1) consume&gen ; 2) gen only ; 3) comsume only ; 4) grid
 #First asset in variable name determines which has polarity priority: PVtoGrid is from PV's perspective, so a + number because gen
 #All numbers are discharge power (note this is obviously instantaneous, not energy scaled for interval duration)
 #Initialize most to 0 so final iteration remains finite
 #OLD#m.powerBattery = en.Var( m.T, bounds=(-powerBatteryMax, powerBatteryMax), initialize = 0 )
 m.SOC = en.Var(m.T, bounds=(SOCMin, SOCMax) ) 
-m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, powerBatteryMax * enableBattery), initialize = 0 ) 
+m.batteryChargeFromGrid = en.Var( m.T, bounds=(0, powerBatteryMax * enableBattery * enableBatteryFromGrid), initialize = 0 ) 
 m.batteryDischargeToGrid = en.Var( m.T, bounds=( -powerBatteryMax * enableBattery, 0 ), initialize = 0 ) 
 m.batteryChargeFromPV = en.Var( m.T, bounds=(0, powerBatteryMax * enableBattery * enablePV * enablePVtoBattery), initialize = 0 ) 
 m.batteryDischargeToSR = en.Var( m.T, bounds=(-powerBatteryMax * enableBattery * enableSRLoad * enableBatteryToSR, 0 ), initialize = 0 ) 
@@ -365,22 +374,27 @@ def Total_cost(model):
   return sum(   
     (
     #SR building consume from grid
-    + m.SRfromGrid[t]
+    ( m.SRfromGrid[t] * (1 + DCMChargeSpoof / m.price[t] ) )
     #===Battery Rules===
     #battery supply/discharge to grid
-    + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
+    # (-) * (1 - 0.01 / 25 ) * 25
+    + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + RTPrice_boost) ) ) 
     #Battery consume/charge from PV at grid price
-    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) 
+    #(+) * (1 - 0.01 / 25 )
+    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + RTPrice_boost) ) ) 
     #SR consume from Battery
-    + ( m.batteryDischargeToSR[t] * ( ( marginalCostPV + marginalCostBattery ) /  ( m.price[t] + 0.000001) ) ) 
+    #
+    + ( m.batteryDischargeToSR[t] * (  marginalCostBattery / ( m.price[t] + RTPrice_boost) ) ) 
     #Battery consume/charge from PV at ~0 marginal cost
-    + ( m.batteryChargeFromPV[t] * ( ( marginalCostBattery + marginalCostPV ) /  ( m.price[t] + 0.000001) ) ) 
+    #(+) * (0.01 + 0.02) / 25
+    + ( m.batteryChargeFromPV[t] * ( ( marginalCostBattery + marginalCostPV ) / ( m.price[t] + RTPrice_boost) ) ) 
     #PV supply to grid
-    + ( m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) ) \
+    #(-) * (1- 0.01/25) * 25
+    + ( m.PVtoGrid[t] * (1 - marginalCostPV / ( m.price[t] + RTPrice_boost ) ) ) \
     #SR consume from PV
-    + ( m.PVtoSR[t] * ( marginalCostPV /  ( m.price[t] + 0.000001) ) ) 
+    + ( m.PVtoSR[t] * ( marginalCostPV /  ( m.price[t] + RTPrice_boost) ) ) 
     #Genset supply to grid - ALGEBRA DOESN"T LOOK RIGHT HERE, CHECK LATER
-    + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) )
+    + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + RTPrice_boost) ) * (1 - marginalCostGenset /  ( m.price[t] + RTPrice_boost) ) )
     #Load bank consume from grid
     + m.powerLoadBank[t]
     ) * m.price[t] 

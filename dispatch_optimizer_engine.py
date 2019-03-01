@@ -378,10 +378,10 @@ def Total_cost(model):
     #===Battery Rules===
     #battery supply/discharge to grid
     # (-) * (1 - 0.01 / 25 ) * 25
-    + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + RTPrice_boost) ) ) 
+    + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery  /  ( m.price[t] + RTPrice_boost) ) ) 
     #Battery consume/charge from PV at grid price
     #(+) * (1 - 0.01 / 25 )
-    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery /  ( m.price[t] + RTPrice_boost) ) ) 
+    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery + DCMChargeSpoof /  ( m.price[t] + RTPrice_boost) ) ) 
     #SR consume from Battery
     #
     + ( m.batteryDischargeToSR[t] * (  marginalCostBattery / ( m.price[t] + RTPrice_boost) ) ) 
@@ -553,7 +553,7 @@ for v in m.component_objects(en.Var, active=True):
           batteryChargeFromGridSolved[index] = en.value(v[index])
         elif j == 2:
           batteryDischargeToGridSolved[index] = en.value(v[index])
-          powerBatteryNetNegSolved[index] 
+          #powerBatteryNetNegSolved[index] 
         elif j == 3:
           batteryChargeFromPVSolved[index] = en.value(v[index])
         elif j == 4:

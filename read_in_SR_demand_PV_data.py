@@ -79,14 +79,7 @@ df = df_in.sort_index()
 df.PV_kw.clip(lower=0, inplace=True)
 df.SR_kw.clip(lower=0, inplace=True)
 
-num_bins = 20
-counts, bin_edges = np.histogram (df['PV_kw'].values, bins=num_bins, normed=True)
-cdf = np.cumsum(counts)
 
-plt.close('all')
-plt.plot (bin_edges[1:], counts)
-plt.figure()
-plt.plot(bin_edges[1:], cdf/cdf[-1])
 
 q = 50 #random percentile to sample, can check against describe above at 50%
 print(np.percentile(df['PV_kw'], q))
@@ -97,6 +90,120 @@ df_avg_15m = df.groupby(pd.Grouper(freq='15Min')).aggregate(np.average)
 #Generate columns with energy generated/consumed per 15 minutes interval
 df_avg_15m['SR_kwh'] = df_avg_15m.SR_kw /4 #4 15-min intervals per hour
 df_avg_15m['PV_kwh'] = df_avg_15m.PV_kw / 4
+df_avg_15m['PV-SR_kwh'] = (df_avg_15m.PV_kw - df_avg_15m.SR_kw) / 4
+
+num_bins = 20
+
+#=========================PLOT ALL-YEAR DATA===========================
+#=======PV plots=========
+counts, bin_edges = np.histogram (df_avg_15m['PV_kwh'].values, bins=num_bins)
+cdf = np.cumsum(counts)
+
+plt.close('all')
+fig1 = plt.figure(figsize = (12,12))
+
+
+ax1 = fig1.add_subplot(321)
+ax1.plot (bin_edges[1:], counts)
+ax1.set_xlabel('Hist: PV energy generated per 15 minute interval')
+
+ax2 = fig1.add_subplot(322)
+ax2.plot(bin_edges[1:], cdf/cdf[-1])
+ax2.set_xlabel('PV Energy gnerated per 15 min CDF')
+
+#========SR=========
+counts, bin_edges = np.histogram (df_avg_15m['SR_kwh'].values, bins=num_bins)
+cdf = np.cumsum(counts)
+
+ax3 = fig1.add_subplot(323)
+ax3.plot (bin_edges[1:], counts)
+ax3.set_xlabel('Hist: SR energy consumed per 15 minute interval')
+
+ax4 = fig1.add_subplot(324)
+ax4.plot(bin_edges[1:], cdf/cdf[-1])
+ax4.set_xlabel('SR Energy consumed per 15 min CDF')
+
+#============PV-SR===========
+counts, bin_edges = np.histogram (df_avg_15m['PV-SR_kwh'].values, bins=num_bins)
+cdf = np.cumsum(counts)
+
+ax5 = fig1.add_subplot(325)
+ax5.plot (bin_edges[1:], counts)
+ax5.set_xlabel('Hist: PV-SR energy per 15 minute interval')
+
+ax6 = fig1.add_subplot(326)
+ax6.plot(bin_edges[1:], cdf/cdf[-1])
+ax6.set_xlabel('PV-SR energy per 15 min interval CDF')
+
+fig1.suptitle('Statistics for all 15-min data throughout year, all hours')
+
+
+
+#=====================EXCLUDE N0N-PEAK/NIGHTTIME DATA=======================
+df_avg_15m_day = df_avg_15m.between_time('06:00','18:00')
+#=======PV plots=========
+counts, bin_edges = np.histogram (df_avg_15m_day['PV_kwh'].values, bins=num_bins)
+cdf = np.cumsum(counts)
+
+fig2 = plt.figure(figsize = (12,12))
+
+
+ax1 = fig2.add_subplot(321)
+ax1.plot (bin_edges[1:], counts)
+ax1.set_xlabel('Hist: PV energy generated per 15 minute interval')
+
+ax2 = fig2.add_subplot(322)
+ax2.plot(bin_edges[1:], cdf/cdf[-1])
+ax2.set_xlabel('PV Energy gnerated per 15 min CDF')
+
+#========SR=========
+counts, bin_edges = np.histogram (df_avg_15m_day['SR_kwh'].values, bins=num_bins)
+cdf = np.cumsum(counts)
+
+ax3 = fig2.add_subplot(323)
+ax3.plot (bin_edges[1:], counts)
+ax3.set_xlabel('Hist: SR energy consumed per 15 minute interval')
+
+ax4 = fig2.add_subplot(324)
+ax4.plot(bin_edges[1:], cdf/cdf[-1])
+ax4.set_xlabel('SR Energy consumed per 15 min CDF')
+
+#============PV-SR===========
+counts, bin_edges = np.histogram (df_avg_15m_day['PV-SR_kwh'].values, bins=num_bins)
+cdf = np.cumsum(counts)
+
+ax5 = fig2.add_subplot(325)
+ax5.plot (bin_edges[1:], counts)
+ax5.set_xlabel('Hist: PV-SR energy per 15 minute interval')
+
+ax6 = fig2.add_subplot(326)
+ax6.plot(bin_edges[1:], cdf/cdf[-1])
+ax6.set_xlabel('PV-SR energy per 15 min interval CDF')
+
+fig2.suptitle('Statistics for all 15-min data throughout year, daytime only')
+
+
+#=========================Look at DAY VS NIGHT OF JUST PV-SR FOR QC===============
+counts1, bin_edges1 = np.histogram (df_avg_15m['PV-SR_kwh'].values, bins=num_bins)
+cdf1 = np.cumsum(counts1)
+counts2, bin_edges2 = np.histogram (df_avg_15m_day['PV-SR_kwh'].values, bins=num_bins)
+cdf2 = np.cumsum(counts2)
+
+fig3 = plt.figure(figsize = (12,8))
+ax1 = fig3.add_subplot(121)
+ax1.plot (bin_edges1[1:], counts1)
+ax1.plot (bin_edges2[1:], counts2)
+ax1.legend(['all hours', '06:00-18:00 only'], loc='upper right')
+ax1.set_xlabel('PV-SR energy [kWh] per 15 min interval')
+
+ax2 = fig3.add_subplot(122)
+ax2.plot(bin_edges1[1:], cdf1/cdf1[-1])
+ax2.plot(bin_edges2[1:], cdf2/cdf2[-1])
+ax2.legend(['all hours', '06:00-18:00 only'])
+ax2.set_xlabel('PV-SR energy [kWh] per 15 min interval CDF')
+
+fig3.suptitle('PV-SR all hours and day-only for QC')
+
 
 """
 df = df_in.set_index(['type','month', 'node'])

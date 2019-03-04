@@ -95,6 +95,7 @@ SOCMax = 1050 #kWh
 powerBatteryMax = 250 #kW
 powerPVMax = 350 #kW, not super important, as PV always constrained to below forecasted PV
 PVScale = 5
+SRScale = 2 #Remove (or set to 1) when productized
 PVRoundTripEfficiency = 1
 gensetHeatRate = 9.8
 costGas = 3 #($/MWh)
@@ -124,13 +125,15 @@ enableGenset = False
 enableGensetToSR = False
  
 enableLoadBank = False 
-enableSRLoad = False 
+enableSRLoad = True 
 
 enableNetInterconnectConstraint = True 
 netInterconnectConstraint = 100 #kW
 
+enableNCPReduction = False
+
 returnToSOC = False #Need to implement
-enableDCM = False #enable demand charge management - Vestigial
+#enableDCM = False #enable demand charge management - Vestigial
 clipNegPVInput = True #Make sure forecast is always - or 0 (sometimes it goes + by mistake)
 #convertPriceInMWtoKW = False
 enableMarginalCosts = True
@@ -142,8 +145,24 @@ runOnVM = False
 timeSoCFixed = 178
 
 #This is just a spoof to test demand charges on the SR building to ensure functionality of battery to SR
-DCMChargeSpoof = 5 
+#Disable if already using NCP Reduction
+DCMChargeSpoof = 5 * ~enableNCPReduction
 RTPrice_boost = 0 #small modifier to RTMPrice to keep 0 price from blowing up. Delete when done testing
+
+
+#===========Demand Charge Parameters==================
+#Optimization will use the greater of the two parameters below throughout each time step
+#  to reduce the peak
+#Value to initiate the demand charge reduction process [kWh consumed per interval]
+#  If PV is running it can mitigate some demand charges.
+#Pick a value which will not occur too frequently, typically informed by historical data
+#Also must be a value the battery/BTM generation can reasonably reduce
+NCPSeedValueWithPV = 50 #kWh
+NCPSeedValueWithoutPV = 70 #kWh
+#The rolling max peak actually observed. 
+#Providing this code is not provided in this program - must be fed externally, to be developed
+MonthlyObservedNCPeak = 45  #kWh
+
 
 #Read parameters and forecasts files
 if runOnVM:
@@ -273,7 +292,7 @@ price.index = np.arange( len(fcast) )
 priceDict = price.to_dict()
 #Read in load data
 #Convert load input DataFrame to pyomo-readable dict
-loadSR = fcast['fc_load_SR'].copy()
+loadSR = ( fcast['fc_load_SR'].copy() * SRScale )
 if manipulateLoad:
   loadSR.iloc[25:65] *= manipulateLoadValue
 if not enableSRLoad:
@@ -317,6 +336,30 @@ fcastPV.head()
 #  fcastPV = fcastPV * (price >= 0)
 fcastPVDict = fcastPV.to_dict()
 
+
+#================NCP reduction seed value and mask array=============
+if enablePV:
+  NCPSeedValue = NCPSeedValueWithPV
+else:
+  NCPSeedValue = NCPSeedValueWithoutPV
+
+#Create mask array which has values only for suspected peaks to reduce
+#e.g. set to 0 if we don't want the optimization to reduce the peak because it has a low value
+if enablePV:
+  #FcastPV (-), loadSR (+), need a positive result when load remains after PV
+  NCPMask = fcastPV + loadSR
+else:
+  NCPMask = loadSR
+
+NCPMask[NCPMask < max(NCPSeedValue,MonthlyObservedNCPeak)] = 0
+NCPMaskDict = NCPMask.to_dict()
+
+if False:
+  plt.figure()
+  plt.plot(NCPMask)
+  plt.plot(fcastPV)
+  plt.plot(loadSR)
+
 #============/Manipulate  inputs=======================
 
 #Initialize Model
@@ -333,6 +376,7 @@ m.T = en.RangeSet(0, len(priceDict) - 1 )
 m.price = en.Param(m.T, within = en.Reals, initialize = priceDict)
 m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
 m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, initialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
+m.NCPCharge = en.Param(m.T, within = en.NonNegativeReals, initialize = NCPMaskDict)
   
 #==========VARIABLES=============
 #Convention order in terms of polarity priority as defined above, 1) consume&gen ; 2) gen only ; 3) comsume only ; 4) grid
@@ -351,17 +395,14 @@ m.batteryChargingBool = en.Var( m.T, domain = en.Integers, initialize = 0 ) #Doe
 m.batteryDischargingBool = en.Var( m.T, domain = en.Integers, initialize = 0 ) #* enableBattery
 m.powerBatteryNetPos = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 ) #* enableBattery #Net Consume/charge
 m.powerBatteryNetNeg = en.Var( m.T, bounds=(-powerBatteryMax, 0), initialize = 0 ) #* enableBattery#Generate/Discharge
-
 m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax * enableLoadBank), initialize = 0 ) 
-
 m.powerGenset = en.Var( m.T, bounds=( -powerGensetMax * enableGenset, 0 ), initialize = 0 ) 
 #Will need a NET, then GenSet to SR, GenSet from Battery (which will go in battery section due to priority rules), Genset to Grid
-
 m.PVtoGrid = en.Var( m.T, bounds=(-powerPVMax * enablePV, 0), initialize = 0 ) 
 m.PVtoSR = en.Var( m.T, bounds=(-powerPVMax * enablePV * enableSRLoad * enablePVtoSR, 0), initialize = 0 ) 
-
 #m.SRfromPV = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
 m.SRfromGrid = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
+
 
 #OBJECTIVE STATEMENT
 """things this does not do yet:
@@ -374,14 +415,14 @@ def Total_cost(model):
   return sum(   
     (
     #SR building consume from grid
-    ( m.SRfromGrid[t] * (1 + DCMChargeSpoof / m.price[t] ) )
+    ( m.SRfromGrid[t] * (1 + DCMChargeSpoof / m.price[t] + m.NCPCharge[t] * 0 / m.price[t]) )
     #===Battery Rules===
     #battery supply/discharge to grid
     # (-) * (1 - 0.01 / 25 ) * 25
     + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery  /  ( m.price[t] + RTPrice_boost) ) ) 
     #Battery consume/charge from PV at grid price
     #(+) * (1 - 0.01 / 25 )
-    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery + DCMChargeSpoof /  ( m.price[t] + RTPrice_boost) ) ) 
+    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery + DCMChargeSpoof /  ( m.price[t] + RTPrice_boost) +  m.NCPCharge[t] * 0 / (m.price[t] + RTPrice_boost) ) ) 
     #SR consume from Battery
     #
     + ( m.batteryDischargeToSR[t] * (  marginalCostBattery / ( m.price[t] + RTPrice_boost) ) ) 

@@ -415,14 +415,14 @@ def Total_cost(model):
   return sum(   
     (
     #SR building consume from grid
-    ( m.SRfromGrid[t] * (1 + DCMChargeSpoof / m.price[t] + m.NCPCharge[t] * 0 / m.price[t]) )
+    ( m.SRfromGrid[t] * (1 + DCMChargeSpoof / m.price[t] + m.NCPCharge[t] / m.price[t]) )
     #===Battery Rules===
     #battery supply/discharge to grid
     # (-) * (1 - 0.01 / 25 ) * 25
     + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery  /  ( m.price[t] + RTPrice_boost) ) ) 
     #Battery consume/charge from PV at grid price
     #(+) * (1 - 0.01 / 25 )
-    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery + DCMChargeSpoof /  ( m.price[t] + RTPrice_boost) +  m.NCPCharge[t] * 0 / (m.price[t] + RTPrice_boost) ) ) 
+    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery + DCMChargeSpoof /  ( m.price[t] + RTPrice_boost) +  m.NCPCharge[t] / (m.price[t] + RTPrice_boost) ) ) 
     #SR consume from Battery
     #
     + ( m.batteryDischargeToSR[t] * (  marginalCostBattery / ( m.price[t] + RTPrice_boost) ) ) 

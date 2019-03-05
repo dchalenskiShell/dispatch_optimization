@@ -289,7 +289,8 @@ else:
 
 #============Manipulate  inputs=======================
 price.index = np.arange( len(fcast) )
-priceDict = price.to_dict()
+priceDict = price.to_dict(
+    )
 #Read in load data
 #Convert load input DataFrame to pyomo-readable dict
 loadSR = ( fcast['fc_load_SR'].copy() * SRScale )
@@ -376,7 +377,7 @@ m.T = en.RangeSet(0, len(priceDict) - 1 )
 m.price = en.Param(m.T, within = en.Reals, initialize = priceDict)
 m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
 m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, initialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
-m.NCPCharge = en.Param(m.T, within = en.NonNegativeReals, initialize = NCPMaskDict)
+m.NCPCharge = en.Param(m.T, within = en.NonNegativeReals, initialize = 0 ) # NCPMaskDict)
   
 #==========VARIABLES=============
 #Convention order in terms of polarity priority as defined above, 1) consume&gen ; 2) gen only ; 3) comsume only ; 4) grid
@@ -391,8 +392,8 @@ m.batteryChargeFromPV = en.Var( m.T, bounds=(0, powerBatteryMax * enableBattery 
 m.batteryDischargeToSR = en.Var( m.T, bounds=(-powerBatteryMax * enableBattery * enableSRLoad * enableBatteryToSR, 0 ), initialize = 0 ) 
 #m.batteryChargingBool = en.Var( m.T, within = en.Boolean , initialize = 0 ) #Does this need to be implemented somehow?* enableBattery
 #m.batteryDischargingBool = en.Var( m.T, within = en.Boolean , initialize = 0 ) #* enableBattery
-m.batteryChargingBool = en.Var( m.T, domain = en.Integers, initialize = 0 ) #Does this need to be implemented somehow?* enableBattery
-m.batteryDischargingBool = en.Var( m.T, domain = en.Integers, initialize = 0 ) #* enableBattery
+m.batteryChargingBool = en.Var( m.T, domain = en.Binary, initialize = 0 ) #Does this need to be implemented somehow?* enableBattery
+m.batteryDischargingBool = en.Var( m.T, domain = en.Binary, initialize = 0 ) #* enableBattery
 m.powerBatteryNetPos = en.Var( m.T, bounds=(0, powerBatteryMax), initialize = 0 ) #* enableBattery #Net Consume/charge
 m.powerBatteryNetNeg = en.Var( m.T, bounds=(-powerBatteryMax, 0), initialize = 0 ) #* enableBattery#Generate/Discharge
 m.powerLoadBank = en.Var( m.T, bounds=( 0 , powerLoadBankMax * enableLoadBank), initialize = 0 ) 
@@ -534,13 +535,13 @@ if enableNetInterconnectConstraint:
 
 #=============Solve the model==========================
 
-opt = SolverFactory('glpk', tee = True)
+opt = SolverFactory('glpk')
 #opt = SolverFactory('ipopt') #for MILP
 
 print('duration of initialization prior to solve: ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 start = timer()
 print('solving...')
-results = opt.solve(m)
+results = opt.solve(m, tee = True)
 print('duration of solve : ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 
 #m.display() #Uncomment to display results, but shoudl just check log file

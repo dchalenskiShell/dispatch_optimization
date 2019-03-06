@@ -6,6 +6,7 @@ Created on Sun Nov 18 15:40:52 2018
 
 https://tdhopper.com/blog/my-python-environment-workflow-with-conda/
 
+https://stackoverflow.com/questions/34119866/setting-up-and-using-meld-as-your-git-difftool-and-mergetool
 
 To implement:
   Return to SOC
@@ -289,8 +290,7 @@ else:
 
 #============Manipulate  inputs=======================
 price.index = np.arange( len(fcast) )
-priceDict = price.to_dict(
-    )
+priceDict = price.to_dict()
 #Read in load data
 #Convert load input DataFrame to pyomo-readable dict
 loadSR = ( fcast['fc_load_SR'].copy() * SRScale )
@@ -416,14 +416,14 @@ def Total_cost(model):
   return sum(   
     (
     #SR building consume from grid
-    ( m.SRfromGrid[t] * (1 + DCMChargeSpoof / m.price[t] + m.NCPCharge[t] / m.price[t]) )
+    ( m.SRfromGrid[t] * (1  + m.NCPCharge[t] / m.price[t]) )
     #===Battery Rules===
     #battery supply/discharge to grid
     # (-) * (1 - 0.01 / 25 ) * 25
     + ( m.batteryDischargeToGrid[t] * (1 - marginalCostBattery  /  ( m.price[t] + RTPrice_boost) ) ) 
     #Battery consume/charge from PV at grid price
     #(+) * (1 - 0.01 / 25 )
-    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery + DCMChargeSpoof /  ( m.price[t] + RTPrice_boost) +  m.NCPCharge[t] / (m.price[t] + RTPrice_boost) ) ) 
+    + ( m.batteryChargeFromGrid[t] * (1 - marginalCostBattery +  m.NCPCharge[t] / (m.price[t] + RTPrice_boost) ) ) 
     #SR consume from Battery
     #
     + ( m.batteryDischargeToSR[t] * (  marginalCostBattery / ( m.price[t] + RTPrice_boost) ) ) 
@@ -432,7 +432,7 @@ def Total_cost(model):
     + ( m.batteryChargeFromPV[t] * ( ( marginalCostBattery + marginalCostPV ) / ( m.price[t] + RTPrice_boost) ) ) 
     #PV supply to grid
     #(-) * (1- 0.01/25) * 25
-    + ( m.PVtoGrid[t] * (1 - marginalCostPV / ( m.price[t] + RTPrice_boost ) ) ) \
+    + ( m.PVtoGrid[t] * (1 - marginalCostPV / ( m.price[t] + RTPrice_boost ) ) )
     #SR consume from PV
     + ( m.PVtoSR[t] * ( marginalCostPV /  ( m.price[t] + RTPrice_boost) ) ) 
     #Genset supply to grid - ALGEBRA DOESN"T LOOK RIGHT HERE, CHECK LATER
@@ -486,8 +486,6 @@ m.powerImportConst = en.Constraint(m.T, rule = power_import)
 def battery_charge_net(m, t):
   return m.powerBatteryNetPos[t] == m.batteryChargeFromGrid[t] + m.batteryChargeFromPV[t]
 m.batteryChargeNetConst = en.Constraint(m.T, rule = battery_charge_net )
-
-
 #net battery neg (discharge)
 def battery_discharge_net(m, t):
   return m.powerBatteryNetNeg[t] == m.batteryDischargeToGrid[t] + m.batteryDischargeToSR[t]
@@ -508,18 +506,18 @@ def battery_charge_or_discharge(m, t):
   return m.batteryDischargingBool[t] + m.batteryChargingBool[t] <= 1 
 m.batteryOnlyChargeorDischarge = en.Constraint(m.T, rule = battery_charge_or_discharge )
 
+#Interconnect above a certain threshold are charged DCM to disincentivize the behavior
+
 
 #Load of SR building must be met but source can be battery, grid or PV
 def SR_consume_conservation(m, t):
   return m.loadSR[t] == -m.PVtoSR[t] + m.SRfromGrid[t] + m.batteryDischargeToSR[t]
 m.SRConserveConst = en.Constraint(m.T, rule = SR_consume_conservation )
-
 #Can't commit to using more PV than available from forecast
 #The elements are different sign (battery charge and PV discharge), hence negative
 def PV_commit_max(m, t):
   return m.fcastPV[t] <= m.PVtoSR[t] + m.PVtoGrid[t] - m.batteryChargeFromPV[t]
 m.PVcommitConst = en.Constraint(m.T, rule = PV_commit_max )
-
 
 if enableNetInterconnectConstraint:
   def net_export_constraint(m, t):
@@ -537,6 +535,9 @@ if enableNetInterconnectConstraint:
 
 opt = SolverFactory('glpk')
 #opt = SolverFactory('ipopt') #for MILP
+
+#Time limit in seconds
+opt.options['tmlim'] = 60
 
 print('duration of initialization prior to solve: ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 start = timer()

@@ -160,8 +160,8 @@ netInterconnectConstraint = 100 #kW
 #  If PV is running it can mitigate some demand charges.
 #Pick a value which will not occur too frequently, typically informed by historical data
 #Also must be a value the battery/BTM generation can reasonably reduce
-NCPSeedValueWithPV = 50 #NUKE #kWh
-NCPSeedValueWithoutPV = 70 #NUKE #kWh
+#NCPSeedValueWithPV = 50 #NUKE #kWh
+#NCPSeedValueWithoutPV = 70 #NUKE #kWh
 #The value below is the demand charge NCP peak above which we want to shave, determined statistically from analysis
 InterconnectNCPShaveValueInput = 70 # kWh #KEEP
 #The rolling max peak actually observed. 
@@ -348,6 +348,7 @@ fcastPVDict = fcastPV.to_dict()
 
 
 #================NCP reduction seed value and mask array=============
+"""
 if enablePV:
   NCPSeedValue = NCPSeedValueWithPV
 else:
@@ -369,13 +370,15 @@ if False:
   plt.plot(NCPMask)
   plt.plot(fcastPV)
   plt.plot(loadSR)
-
+"""
 #Shave peaks below either the statistically determined value or the actualy monthly observed peak
 #this is probably where you will implement ratchet by incorporating an 80% from values seen from last year
 #Also correct peak demand value if it is higher than our export constraint
 InterconnectNCPShave = min(netInterconnectConstraint, max(InterconnectNCPShaveValueInput , MonthlyObservedNCPeak , ratchetPercentage*RatchetPreviousTwelveMonthsObservedPeak) )
 
 netInterconnectConstraintExport = netInterconnectConstraint
+
+print('Interconnect operating DCM shave limit is currently: ' + str(InterconnectNCPShave))
 
 #============/Manipulate  inputs=======================
 
@@ -392,7 +395,7 @@ m.T = en.RangeSet(0, len(priceDict) - 1 )
 # Don't use enable/disable on these, the forecasts should always be valid
 m.price = en.Param(m.T, within = en.Reals, initialize = priceDict)
 m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
-m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, initialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
+m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, iônitialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
 m.NCPCharge = en.Param(m.T, within = en.NonNegativeReals, initialize = 0 ) # NCPMaskDict)
   
 #==========VARIABLES=============
@@ -422,8 +425,8 @@ m.SRfromGrid = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
 #Demand charge adder, bounded at 0 or whatever value would bring us up to the max net interconnect constraint
 m.demandChargeAdder = en.Var(m.T, bounds=(0, netInterconnectConstraint - InterconnectNCPShave), within = en.NonNegativeReals, initialize = 0)
 #BELOW: NEED A VARIABLE TO ALLOW CHANGE OF STATE FOR DEMAND CHARGE SHAVE VALUE
-m.netInterconnectConstraintImport = en.Var(m.T, within = en.NonNegativeReals, initialize = InterconnectNCPShave)
-
+m.netInterconnectConstraintImport = en.Var(m.T, bounds=(0,100), within = en.NonNegativeReals, initialize = InterconnectNCPShave)
+"""WHY CAN'T THE ABOVE BE BOUNDED TO bounds = (0, netInterconnectConstraint),"""
 
 #OBJECTIVE STATEMENT
 """things this does not do yet:
@@ -481,29 +484,6 @@ def State(m, t):
       return m.SOC[t] == m.SOC[t-1] + ( enableBattery * (m.powerBatteryNetNeg[t-1] + m.powerBatteryNetPos[t-1]) / intervalsPerHour )   
 m.State_of_charge = en.Constraint(m.T, rule = State)
 
-"""
-#MG new power out (generate/export/discharge) terms
-#note: 0.000001 additions below were just to ensure not div/0 when testing price=0
-def power_export(m, t):
-  return m.powerExport[t] ==  \
-      ( m.powerBatteryNeg[t] * enableBattery * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) \
-      + m.PVtoGrid[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) \
-      + ( m.powerGenset[t] * ( 1 - gensetHeatRate * costGas / ( m.price[t] + 0.000001) ) * (1 - marginalCostGenset /  ( m.price[t] + 0.000001) ) ) 
-      #+ ( m.fcastPV[t] * m.booleanPV[t] * (1 - marginalCostPV /  ( m.price[t] + 0.000001) ) ) \ #Commented this because it duplicates an above line
-m.powerExportConst = en.Constraint(m.T, rule = power_export)
-"""
-"""
-#MG new power in (consume/import/charge) terms
-#This follows sign constraint, -ve means export
-def power_import(m, t):
-  return m.powerImport[t] == \
-      ( m.batteryChargeFromGrid[t] * enableBattery * (1 - marginalCostBattery /  ( m.price[t] + 0.000001) ) ) \
-      + ( m.batteryChargeFromPV[t] * enableBattery * ( ( marginalCostBattery + marginalCostPV ) /  ( m.price[t] + 0.000001) ) ) \
-      + m.loadSR[t]  \
-      + m.powerLoadBank[t]
-m.powerImportConst = en.Constraint(m.T, rule = power_import)
-"""
-
 #Net battery pos (charge)
 def battery_charge_net(m, t):
   return m.powerBatteryNetPos[t] == m.batteryChargeFromGrid[t] + m.batteryChargeFromPV[t]
@@ -542,16 +522,11 @@ m.PVcommitConst = en.Constraint(m.T, rule = PV_commit_max )
 #(new) higher demand charge maximum
 def demand_charge_adder_sustain(m, t):
   if t == 0:
-    return m.netInterconnectConstraintImport[t] == InterconnectNCPShave   #Initialize to the current observed (or statistically predicted) peak value 
+    return  m.netInterconnectConstraintImport[t] == InterconnectNCPShave   #Initialize to the current observed (or statistically predicted) peak value 
   else:        
     return m.netInterconnectConstraintImport[t] == m.netInterconnectConstraintImport[t-1] + m.demandChargeAdder[t-1] 
 m.demand_adder_sustain_const = en.Constraint(m.T, rule = demand_charge_adder_sustain)
-"""
-Thoughts 2019-03-07 for return:
-  Add a constraint:
-    1) ICexport[t] = ICexport[t-1] + NCPAdder[t-1]
-    
-"""
+
 if enableNetInterconnectConstraint:
   def net_export_constraint(m, t):
     return -netInterconnectConstraintExport <= (
@@ -563,6 +538,7 @@ if enableNetInterconnectConstraint:
       #+ m.SRfromGrid[t]
       ) 
   m.netInterconnectConstraintExportConst = en.Constraint(m.T, rule = net_export_constraint)
+  
   def net_import_constraint(m, t):
     return (
       #m.batteryDischargeToGrid[t] 
@@ -593,6 +569,14 @@ print('duration of solve : ' + str(np.round( timer() - start , 2) ) + ' seconds'
 
 
 #=============Retrieve results==============================
+#Write model to log file and copy Python source code for reference
+if createLogfile:
+  with open(dirLogsOut + str(epochTime) + '_' + "log_file.txt", "w") as fout:
+    m.pprint(ostream = fout)
+  if not runOnVM:
+    copyfile(currFilePath + '\\' + currFileName, dirLogsOut + str(epochTime) + '_'  + currFileName)
+
+
 SOCSolved = np.zeros( (len(price)) )
 batteryChargeFromGridSolved = np.zeros( (len(price)) )
 batteryDischargeToGridSolved= np.zeros( (len(price)) )
@@ -622,13 +606,6 @@ netInterconnectPower = np.zeros( (len(price)) )
 SRfromBatterySolved = np.zeros( (len(price)) )
 #negPriceOut = np.zeros( (len(price)) )
 #posPriceOut = np.zeros( (len(price)) )
-
-#Write model to log file and copy Python source code for reference
-if createLogfile:
-  with open(dirLogsOut + str(epochTime) + '_' + "log_file.txt", "w") as fout:
-    m.pprint(ostream = fout)
-  if not runOnVM:
-    copyfile(currFilePath + '\\' + currFileName, dirLogsOut + str(epochTime) + '_'  + currFileName)
 
 #Access variables
 j = 0
@@ -848,8 +825,11 @@ plt.legend(['load SR', 'SR from Grid +2', 'SR from battery +3', 'SR from PV +4']
 
 ax6 = fig.add_subplot(326)
 ax6.plot(netInterconnectImportSolved)
-ax6.plot(netInterconnectImportSolved + NCPChargeSolved, '.')
-plt.legend(['Net Interconnect Import Limit','NCP Charge'])
+ax6.plot(netInterconnectImportSolved + NCPChargeSolved - 3, '.')
+ax6.plot(DemandChargeAdderSolved)
+plt.legend(['Net Interconnect Import Limit','NCP Charge (-3)','Demand charge adder'])
+
+plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure2.png')
 
 """
 ax6 = fig.add_subplot(326)

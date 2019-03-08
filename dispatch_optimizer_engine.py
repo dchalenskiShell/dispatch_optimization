@@ -128,8 +128,7 @@ enableGensetToSR = False
 enableLoadBank = False 
 enableSRLoad = True 
 
-enableNetInterconnectConstraint = True 
-netInterconnectConstraint = 100 #kW
+
 
 enableNCPReduction = False
 
@@ -150,6 +149,9 @@ timeSoCFixed = 178
 DCMChargeSpoof = 5 * ~enableNCPReduction
 RTPrice_boost = 0 #small modifier to RTMPrice to keep 0 price from blowing up. Delete when done testing
 
+enableNetInterconnectConstraint = True 
+netInterconnectConstraint = 100 #kW
+
 
 #===========Demand Charge Parameters==================
 #Optimization will use the greater of the two parameters below throughout each time step
@@ -158,12 +160,19 @@ RTPrice_boost = 0 #small modifier to RTMPrice to keep 0 price from blowing up. D
 #  If PV is running it can mitigate some demand charges.
 #Pick a value which will not occur too frequently, typically informed by historical data
 #Also must be a value the battery/BTM generation can reasonably reduce
-NCPSeedValueWithPV = 50 #kWh
-NCPSeedValueWithoutPV = 70 #kWh
+NCPSeedValueWithPV = 50 #NUKE #kWh
+NCPSeedValueWithoutPV = 70 #NUKE #kWh
+#The value below is the demand charge NCP peak above which we want to shave, determined statistically from analysis
+InterconnectNCPShaveValueInput = 70 # kWh #KEEP
 #The rolling max peak actually observed. 
 #Providing this code is not provided in this program - must be fed externally, to be developed
-MonthlyObservedNCPeak = 45  #kWh
+MonthlyObservedNCPeak = 45  #kWh #Probably keep this
+RatchetPreviousTwelveMonthsObservedPeak = 45 #kWh
+ratchetPercentage = 0.80
 
+DEMANDCHARGECOST = 50000
+NCPRatchetTariffRate = 2 #$
+NumberMonthsRatchet = 12
 
 #Read parameters and forecasts files
 if runOnVM:
@@ -232,7 +241,7 @@ elif True:
   #Response to negative prices
   price.iloc[:] = 10
   price.iloc[ 51:75 ] = 50
-  price.iloc[ 150:200 ] = 75
+  price.iloc[ 150:200 ] = 300
 elif False:
   #Respond to positive and negative prices
   price.iloc[:] = 20
@@ -361,6 +370,13 @@ if False:
   plt.plot(fcastPV)
   plt.plot(loadSR)
 
+#Shave peaks below either the statistically determined value or the actualy monthly observed peak
+#this is probably where you will implement ratchet by incorporating an 80% from values seen from last year
+#Also correct peak demand value if it is higher than our export constraint
+InterconnectNCPShave = min(netInterconnectConstraint, max(InterconnectNCPShaveValueInput , MonthlyObservedNCPeak , ratchetPercentage*RatchetPreviousTwelveMonthsObservedPeak) )
+
+netInterconnectConstraintExport = netInterconnectConstraint
+
 #============/Manipulate  inputs=======================
 
 #Initialize Model
@@ -403,6 +419,10 @@ m.PVtoGrid = en.Var( m.T, bounds=(-powerPVMax * enablePV, 0), initialize = 0 )
 m.PVtoSR = en.Var( m.T, bounds=(-powerPVMax * enablePV * enableSRLoad * enablePVtoSR, 0), initialize = 0 ) 
 #m.SRfromPV = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
 m.SRfromGrid = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
+#Demand charge adder, bounded at 0 or whatever value would bring us up to the max net interconnect constraint
+m.demandChargeAdder = en.Var(m.T, bounds=(0, netInterconnectConstraint - InterconnectNCPShave), within = en.NonNegativeReals, initialize = 0)
+#BELOW: NEED A VARIABLE TO ALLOW CHANGE OF STATE FOR DEMAND CHARGE SHAVE VALUE
+m.netInterconnectConstraintImport = en.Var(m.T, within = en.NonNegativeReals, initialize = InterconnectNCPShave)
 
 
 #OBJECTIVE STATEMENT
@@ -440,6 +460,8 @@ def Total_cost(model):
     #Load bank consume from grid
     + m.powerLoadBank[t]
     ) * m.price[t] 
+    #Demand charge peak reduction
+    + m.demandChargeAdder[t] * DEMANDCHARGECOST
     #NOT SURE IF BELOW WORK PROPERLY
     + ( m.powerBatteryNetPos[t] * degradationCostSlope * batteryDegrades) 
     - ( m.powerBatteryNetNeg[t] * degradationCostSlope * batteryDegrades)
@@ -506,9 +528,6 @@ def battery_charge_or_discharge(m, t):
   return m.batteryDischargingBool[t] + m.batteryChargingBool[t] <= 1 
 m.batteryOnlyChargeorDischarge = en.Constraint(m.T, rule = battery_charge_or_discharge )
 
-#Interconnect above a certain threshold are charged DCM to disincentivize the behavior
-
-
 #Load of SR building must be met but source can be battery, grid or PV
 def SR_consume_conservation(m, t):
   return m.loadSR[t] == -m.PVtoSR[t] + m.SRfromGrid[t] + m.batteryDischargeToSR[t]
@@ -519,17 +538,41 @@ def PV_commit_max(m, t):
   return m.fcastPV[t] <= m.PVtoSR[t] + m.PVtoGrid[t] - m.batteryChargeFromPV[t]
 m.PVcommitConst = en.Constraint(m.T, rule = PV_commit_max )
 
+#If demand charge adder goes up, ensure it stays up so we can continue to take advantage of
+#(new) higher demand charge maximum
+def demand_charge_adder_sustain(m, t):
+  if t == 0:
+    return m.netInterconnectConstraintImport[t] == InterconnectNCPShave   #Initialize to the current observed (or statistically predicted) peak value 
+  else:        
+    return m.netInterconnectConstraintImport[t] == m.netInterconnectConstraintImport[t-1] + m.demandChargeAdder[t-1] 
+m.demand_adder_sustain_const = en.Constraint(m.T, rule = demand_charge_adder_sustain)
+"""
+Thoughts 2019-03-07 for return:
+  Add a constraint:
+    1) ICexport[t] = ICexport[t-1] + NCPAdder[t-1]
+    
+"""
 if enableNetInterconnectConstraint:
   def net_export_constraint(m, t):
-    return -netInterconnectConstraint <= (
+    return -netInterconnectConstraintExport <= (
       m.batteryDischargeToGrid[t] 
-      + m.batteryChargeFromGrid[t] 
+      #+ m.batteryChargeFromGrid[t] 
       + m.PVtoGrid[t]  
       + m.powerGenset[t] 
       + m.powerLoadBank[t] 
+      #+ m.SRfromGrid[t]
+      ) 
+  m.netInterconnectConstraintExportConst = en.Constraint(m.T, rule = net_export_constraint)
+  def net_import_constraint(m, t):
+    return (
+      #m.batteryDischargeToGrid[t] 
+      m.batteryChargeFromGrid[t] 
+      #+ m.PVtoGrid[t]  
+      #+ m.powerGenset[t] 
+      + m.powerLoadBank[t] 
       + m.SRfromGrid[t]
-      ) <= netInterconnectConstraint
-  m.netInterconnectConstraint = en.Constraint(m.T, rule = net_export_constraint)
+      ) <= m.netInterconnectConstraintImport[t] + m.demandChargeAdder[t]
+  m.netInterconnectConstraintImportConst = en.Constraint(m.T, rule = net_import_constraint)
 
 #=============Solve the model==========================
 
@@ -565,6 +608,9 @@ PVtoGridSolved = np.zeros( (len(price)) )
 PVtoSRSolved = np.zeros( (len(price)) )
 SRfromGridSolved = np.zeros( (len(price)) )
 loadSRSolved = np.zeros( (len(price)) )
+DemandChargeAdderSolved = np.zeros( (len(price)) )
+netInterconnectImportSolved = np.zeros( (len(price)) )
+NCPChargeSolved = np.zeros( (len(price)) )
 
 #powerBatterySolved 
 
@@ -619,6 +665,10 @@ for v in m.component_objects(en.Var, active=True):
           PVtoSRSolved[index] = en.value(v[index])
         elif j == 13:
           SRfromGridSolved[index] = en.value(v[index])
+        elif j == 14:
+          DemandChargeAdderSolved[index] = en.value(v[index])        
+        elif j == 15:
+          netInterconnectImportSolved[index] = en.value(v[index])
     j+=1
       
 #access parameters (to double check)
@@ -632,8 +682,8 @@ for parmobject in m.component_objects(en.Param, active=True):
           priceSolved[index] = en.value(parmobject[index])
         elif j == 1:
           loadSRSolved[index] = en.value(parmobject[index])
-#        elif j == 2:
-#          posPriceOut[index] = en.value(parmobject[index])
+        elif j == 3:
+          NCPChargeSolved[index] = en.value(parmobject[index])
     j+=1
       
 SOCSolvedPercent = SOCSolved / SOCMax
@@ -671,7 +721,7 @@ cashFlowSROnly = np.cumsum( -priceSolved * SRfromGridSolved / intervalsPerHour )
 print("Battery-only revenue is $: " + str(np.round(np.sum (netCashBattery) , 2) ) )  #I HAVE NEGATED - BETTER TO BE CONSISTENT WITH NEG FROM BEGINNING
 cashflowBattery = np.cumsum(netCashBattery)
 
-print('Average state of charge throughour period is: ' + str(np.round(100*np.average(SOCSolvedPercent))) + '%')
+print('Average state of charge throughout period is: ' + str(np.round(100*np.average(SOCSolvedPercent))) + '%')
 
 netInterconnectPower = powerBatteryNetNegSolved + batteryChargeFromGridSolved +  PVtoGridSolved + loadSRSolved + powerGensetSolved + powerLoadBankSolved
 
@@ -745,7 +795,8 @@ ax4.plot(powerGensetSolved, 'c')
 ax4.plot(netInterconnectPower, 'k', linewidth = 2.5)
 ax4.set_ylabel('Asset power (+ve import), (kW)', color='g')
 ax4.tick_params('y', colors='g')
-plt.legend([ 'Battery' , 'loadBank' , 'PV sched (scaled)', 'PV forecast' , 'loadSR', 'Genset', 'Net Interconnect'], loc = 4)
+ax4.axhline(y=InterconnectNCPShave ,linewidth=4, color='r')
+plt.legend([ 'Battery' , 'loadBank' , 'PV sched (scaled)', 'PV forecast' , 'loadSR', 'Genset', 'Net Interconnect', 'NCP limit'], loc = 4)
 fig.tight_layout()
 
 plt.savefig(dirLogsOut + str(epochTime) + '_plan_figure.png')
@@ -784,7 +835,8 @@ ax4.plot(loadSRSolved)
 ax4.plot(powerGensetSolved)
 ax4.plot(powerLoadBankSolved)
 ax4.plot(netInterconnectPower,'k', linewidth = 2.5)
-plt.legend(['battery from grid','battery to grid', 'pv to grid','SR bldg','genset','load bank','net interconnect'])
+ax4.axhline(y=InterconnectNCPShave ,linewidth=4, color='r')
+plt.legend(['battery from grid','battery to grid', 'pv to grid','SR bldg','genset','load bank','net interconnect', 'NCP limit'])
 ax4.set_title('contributions to net interconnect')
 
 ax5 = fig.add_subplot(325)
@@ -795,10 +847,16 @@ ax5.plot(PVtoSRSolved+4)
 plt.legend(['load SR', 'SR from Grid +2', 'SR from battery +3', 'SR from PV +4'])
 
 ax6 = fig.add_subplot(326)
+ax6.plot(netInterconnectImportSolved)
+ax6.plot(netInterconnectImportSolved + NCPChargeSolved, '.')
+plt.legend(['Net Interconnect Import Limit','NCP Charge'])
+
+"""
+ax6 = fig.add_subplot(326)
 ax6.plot(batteryChargingBoolSolved)
 ax6.plot(batteryDischargingBoolSolved)
 plt.legend(['charging boolean', 'discharging boolean'])
-
+"""
 
 
 

@@ -96,7 +96,7 @@ SOCMax = 1050 #kWh
 powerBatteryMax = 250 #kW
 powerPVMax = 350 #kW, not super important, as PV always constrained to below forecasted PV
 PVScale = 5
-SRScale = 2 #Remove (or set to 1) when productized
+SRScale = 1 #Remove (or set to 1) when productized
 PVRoundTripEfficiency = 1
 gensetHeatRate = 9.8
 costGas = 3 #($/MWh)
@@ -150,7 +150,7 @@ DCMChargeSpoof = 5 * ~enableNCPReduction
 RTPrice_boost = 0 #small modifier to RTMPrice to keep 0 price from blowing up. Delete when done testing
 
 enableNetInterconnectConstraint = True 
-netInterconnectConstraint = 100 #kW
+netInterconnectConstraint = 300 #kW
 
 
 #===========Demand Charge Parameters==================
@@ -379,6 +379,7 @@ InterconnectNCPShave = min(netInterconnectConstraint, max(InterconnectNCPShaveVa
 netInterconnectConstraintExport = netInterconnectConstraint
 
 print('Interconnect operating DCM shave limit is currently: ' + str(InterconnectNCPShave))
+print('Interconnect net (physical) constraint is currently: ' + str(netInterconnectConstraint))
 
 #============/Manipulate  inputs=======================
 
@@ -395,7 +396,7 @@ m.T = en.RangeSet(0, len(priceDict) - 1 )
 # Don't use enable/disable on these, the forecasts should always be valid
 m.price = en.Param(m.T, within = en.Reals, initialize = priceDict)
 m.loadSR = en.Param(m.T, within = en.NonNegativeReals, initialize = loadSRDict)
-m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, iônitialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
+m.fcastPV = en.Param(m.T, within = en.NonPositiveReals, initialize = fcastPVDict) #Must be 0 or zero, e.g. bounds = (none, 0)
 m.NCPCharge = en.Param(m.T, within = en.NonNegativeReals, initialize = 0 ) # NCPMaskDict)
   
 #==========VARIABLES=============
@@ -425,7 +426,7 @@ m.SRfromGrid = en.Var(m.T, within = en.NonNegativeReals, initialize = 0)
 #Demand charge adder, bounded at 0 or whatever value would bring us up to the max net interconnect constraint
 m.demandChargeAdder = en.Var(m.T, bounds=(0, netInterconnectConstraint - InterconnectNCPShave), within = en.NonNegativeReals, initialize = 0)
 #BELOW: NEED A VARIABLE TO ALLOW CHANGE OF STATE FOR DEMAND CHARGE SHAVE VALUE
-m.netInterconnectConstraintImport = en.Var(m.T, bounds=(0,100), within = en.NonNegativeReals, initialize = InterconnectNCPShave)
+m.netInterconnectConstraintImport = en.Var(m.T, bounds=(0 , netInterconnectConstraint), within = en.NonNegativeReals, initialize = InterconnectNCPShave)
 """WHY CAN'T THE ABOVE BE BOUNDED TO bounds = (0, netInterconnectConstraint),"""
 
 #OBJECTIVE STATEMENT
@@ -556,7 +557,7 @@ opt = SolverFactory('glpk')
 #opt = SolverFactory('ipopt') #for MILP
 
 #Time limit in seconds
-opt.options['tmlim'] = 60
+opt.options['tmlim'] = 30
 
 print('duration of initialization prior to solve: ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 start = timer()

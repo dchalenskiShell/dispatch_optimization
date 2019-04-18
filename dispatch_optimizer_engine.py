@@ -561,10 +561,14 @@ if enableNetInterconnectConstraint:
 #=============Solve the model==========================
 
 opt = SolverFactory('glpk')
+#Time limit in seconds for GLPK
+#opt.options['tmlim'] = 30
+
+opt = SolverFactory('CPLEX')
+
 #opt = SolverFactory('ipopt') #for MILP
 
-#Time limit in seconds
-opt.options['tmlim'] = 30
+
 
 print('duration of initialization prior to solve: ' + str(np.round( timer() - start , 2) ) + ' seconds' )
 start = timer()

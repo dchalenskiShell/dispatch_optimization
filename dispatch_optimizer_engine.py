@@ -144,6 +144,10 @@ priceSpikeAmt = 50 #$/MWh for spike
 runOnVM = False
 timeSoCFixed = 178
 
+smoothSRLoad =  False  #BOMBS OUT - CREATES NANs FOR FIRST FEW INDICES, NEED TO BACK-TILE OR TRAINGLE FILTER
+smoothingWindow = 5 #units of interval
+
+
 #This is just a spoof to test demand charges on the SR building to ensure functionality of battery to SR
 #Disable if already using NCP Reduction
 DCMChargeSpoof = 5 * ~enableNCPReduction
@@ -163,14 +167,14 @@ netInterconnectConstraint = 300 #kW
 #NCPSeedValueWithPV = 50 #NUKE #kWh
 #NCPSeedValueWithoutPV = 70 #NUKE #kWh
 #The value below is the demand charge NCP peak above which we want to shave, determined statistically from analysis
-InterconnectNCPShaveValueInput = 70 # kWh #KEEP
+InterconnectNCPShaveValueInput = 140 # kWh #KEEP
 #The rolling max peak actually observed. 
 #Providing this code is not provided in this program - must be fed externally, to be developed
 MonthlyObservedNCPeak = 45  #kWh #Probably keep this
 RatchetPreviousTwelveMonthsObservedPeak = 45 #kWh
 ratchetPercentage = 0.80
 
-DEMANDCHARGECOST = 50000
+DEMANDCHARGECOST = .1
 NCPRatchetTariffRate = 2 #$
 NumberMonthsRatchet = 12
 
@@ -179,9 +183,10 @@ if runOnVM:
   fdirFcast = 'E:/Optimization/inputs/'
   fname = 'inputs.pkl'
 else:
-  fdirFcast = 'C:/Users/David.Chalenski/OneDrive - Shell/Documents/ESIS/Microgrid/dispatch optimization/python/dispatch_optimizer_v2/input/'
+  #fdirFcast = 'C:/Users/David.Chalenski/OneDrive - Shell/Documents/ESIS/Microgrid/dispatch optimization/python/dispatch_optimizer_v2/input/'
+  fdirFcast = currFilePath + '\\input\\'
   #fname = 'forecast_all_topython_pkl.pkl'  #I used this for a lot of testing
-  fname = 'input_poc_sample.pkl'
+  fname = 'input_DO_1day_sample.pkl'
   #Uncomment below for actual files used during PoC
   #fdirFcast = 'C:/Users/David.Chalenski/OneDrive - Shell/Documents/ESIS/Microgrid/autogrid POC/2018-12-14 PoC files/'
   #fname ='input_spike.pkl'
@@ -237,7 +242,7 @@ if False:
 elif False:
   #Linearly increasing price
   price.iloc[:] = np.arange( len(fcast ) )
-elif True:
+elif False:
   #Response to negative prices
   price.iloc[:] = 10
   price.iloc[ 51:75 ] = 50
@@ -308,6 +313,8 @@ if manipulateLoad:
 if not enableSRLoad:
   loadSR.iloc[:] = 0
 loadSR.index = np.arange( len(fcast) )
+if smoothSRLoad:
+  loadSR = loadSR.rolling(smoothingWindow).mean()
 loadSRDict = loadSR.to_dict()
 #Read in forecast of solar PV in KW
 #Note: PV is export, so power is negative

@@ -65,7 +65,7 @@ import datetime
 from timeit import default_timer as timer
 import os
 import pandas as pd
-import broken_barh_plot
+#import broken_barh_plot
 from pyomo.opt import SolverFactory
 #from pyomo.core import Var
 #import pprint
@@ -184,7 +184,7 @@ if runOnVM:
   fname = 'inputs.pkl'
 else:
   #fdirFcast = 'C:/Users/David.Chalenski/OneDrive - Shell/Documents/ESIS/Microgrid/dispatch optimization/python/dispatch_optimizer_v2/input/'
-  fdirFcast = currFilePath + '\\input\\'
+  fdirFcast = currFilePath + '/input'
   #fname = 'forecast_all_topython_pkl.pkl'  #I used this for a lot of testing
   fname = 'input_DO_1day_sample.pkl'
   #Uncomment below for actual files used during PoC
@@ -560,7 +560,7 @@ if enableNetInterconnectConstraint:
 
 #=============Solve the model==========================
 
-opt = SolverFactory('glpk')
+#opt = SolverFactory('glpk')
 #Time limit in seconds for GLPK
 #opt.options['tmlim'] = 30
 
